@@ -1,0 +1,36 @@
+# Rust
+target/
+Cargo.lock
+*.rlib
+*.a
+*.dylib
+*.so
+*.dll
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+**/*.rs.bk
+
+# Search index cache (sts-x / tantivy)
+.stsx-index/
+
+# Workspace private memory (do NOT publish)
+.workbuddy/
+
+# Editor / backup
+*.bak
+*.rs.bak
+
+# 嵌套的独立子项目（各自有仓库，不属于 retouch-rs，不应进本仓库）
+ImageColorProfiler/
+fast-video-compress/

@@ -1,0 +1,31 @@
+# retouch-rs factory default (= Adjustments::photo_default)
+# Section/key names mirror darktable-cli module params.
+[exposure]
+ev = 0.0
+
+[tone_map]          # darktable: filmicrgb / sigmoid (our shoulder)
+mode = "none"       # none | agx | filmic
+
+[defake]            # darktable: colorzones (chroma control, our anti-fake-color)
+enabled = true
+chroma_decay = 0.1
+fix_sky = true
+protect_skin = true
+
+[grade]             # darktable: shadhi + levels + toneequal micro-grade
+brightness_lift = 0.06
+contrast = 0.15
+dehaze = 0.25
+shadow_lift = 0.15
+deep_shadow_lift = 0.15
+
+[white_balance]     # darktable: channelmixerrgb (color calibration)
+temperature = 0.0
+tint = 0.0
+
+[color]             # darktable: vibrance / colisa / colorequal
+saturation = 1.0
+vibrance = 0.0
+hue_rotate = 0.0
+split_shadow = 0.0
+split_highlight = 0.0

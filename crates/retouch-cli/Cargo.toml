@@ -1,0 +1,16 @@
+[package]
+name = "retouch-cli"
+version = "0.2.1"
+edition = "2021"
+
+[[bin]]
+name = "retouch-rs"
+path = "src/main.rs"
+
+[dependencies]
+retouch-core = { path = "../retouch-core" }
+retouch-agent = { path = "../retouch-agent" }
+clap = { version = "4", features = ["derive"] }
+image = "0.25"
+palette = "0.7"
+serde_json = "1"

@@ -1,0 +1,12 @@
+# 星TAP Rust 基座: 按目标架构开启 CPU 指令集，LLVM 自动向量化
+# (图像循环 10-30% 免费提速，零代码改动)
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=apple-m1"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# Windows 交叉编译：静态链接 MSVC CRT，产出自包含 exe，
+# 不依赖目标机的 Microsoft Visual C++ Redistributable（否则双击报缺 VCRUNTIME140）。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

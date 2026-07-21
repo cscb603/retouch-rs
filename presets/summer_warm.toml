@@ -1,0 +1,46 @@
+# retouch-rs "夏天暖调" creative preset
+# Warm, punchy, slightly lifted — tuned for daylight/summer shots.
+[exposure]
+ev = 0.1
+
+[tone_map]
+mode = "none"
+
+[defake]
+enabled = true
+chroma_decay = 0.1
+fix_sky = true
+protect_skin = true
+
+[grade]
+brightness_lift = 0.05
+contrast = 0.18
+dehaze = 0.28
+shadow_lift = 0.12
+deep_shadow_lift = 0.12
+
+[white_balance]
+temperature = 0.18
+tint = 0.05
+
+[color]
+saturation = 1.12
+vibrance = 0.2
+hue_rotate = 4.0
+split_shadow = 18.0       # warm shadows
+split_highlight = -8.0     # cool highlights
+
+[hsl.blue]                 # punchier, cleaner skies
+hue = 0.0
+sat = 1.25
+light = 1.0
+
+[hsl.green]                # livelier foliage
+hue = 0.0
+sat = 1.15
+light = 1.0
+
+[hsl.orange]               # warmer sunlit skin / sand
+hue = 6.0
+sat = 1.1
+light = 1.0

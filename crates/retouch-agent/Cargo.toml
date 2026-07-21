@@ -1,0 +1,14 @@
+[package]
+name = "retouch-agent"
+version = "0.2.1"
+edition = "2021"
+
+[dependencies]
+retouch-core = { path = "../retouch-core" }
+serde_json = "1"
+image = "0.25"
+# LLM API access (DeepSeek text decision + Qwen vision review).
+# On macOS the default `tls` (native-tls) uses the system Security framework,
+# so no OpenSSL toolchain is required. `json` enables Response::into_json.
+ureq = { version = "2.9", features = ["json"] }
+base64 = "0.22"

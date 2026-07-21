@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/retouch-core",
+    "crates/retouch-cli",
+    "crates/retouch-agent",
+    "ui/retouch-ui",
+]
+
+# 星TAP Rust 工业级工作流 Release Profile（应用于所有成员 crate）
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "none"  # 留符号名到崩溃报告，方便定位
+# 注意：不用 panic="abort"——abort 会让任何线程的 catch_unwind 失效，
+# 后台渲染线程一旦 panic 直接杀整个进程。用 unwind 保稳。
