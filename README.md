@@ -1,5 +1,7 @@
 # 初色 Retouch
 
+**星TAP实验室 · 极致速度，极简生活**
+
 > 本地运行、不联网、免费的 AI 修图工具。一键智能调色 + 无痕污点修复，Mac / Windows 都能用。
 
 ## 这是什么
@@ -49,6 +51,8 @@ Rust + [egui](https://github.com/emilk/egui)。核心色彩管线基于 OKLCH �
 
 # Retouch (English)
 
+*StarTAP Lab · Extreme speed, minimalist life*
+
 A fully **local, offline, free** photo retouching tool. One-click intelligent color grading and seamless spot/healing repair (source-texture Poisson cloning), for macOS and Windows.
 
 **Highlights**
@@ -62,3 +66,11 @@ A fully **local, offline, free** photo retouching tool. One-click intelligent co
 **Download**: see the Releases page. All processing runs on your machine; nothing leaves your PC.
 
 Built with Rust + egui.
+
+---
+
+## 许可证 / License
+
+本项目以 [MIT 许可证](LICENSE) 发布。版权所有 © 2026 星TAP。
+
+Licensed under the [MIT License](LICENSE). Copyright © 2026 星TAP.
