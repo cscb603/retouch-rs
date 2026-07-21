@@ -20,7 +20,7 @@
 
 ## 30 秒上手
 
-1. 到 [Releases](../../releases) 下载 `Retouch-0.6.4-macOS.zip`（Mac）或 `Retouch-0.6.4-windows-x64.zip`（Windows），解压。
+1. 到 [Releases](https://github.com/cscb603/retouch-rs/releases) 下载 `Retouch-0.6.4-macOS.zip`（Mac）或 `Retouch-0.6.4-windows-x64.zip`（Windows），解压。
 2. **第一次打开请先看压缩包里的 `首次打开必看-Retouch修图.txt`**（Mac 会提示"无法验证"、Win 会被 SmartScreen 拦，都是正常误报，照说明点一下即可）。
 3. 把照片拖进窗口 → 左侧调色 / 选"污点"工具涂抹瑕疵 → 点导出。
 

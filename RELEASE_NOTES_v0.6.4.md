@@ -42,3 +42,13 @@
 - Zero-dependency static builds (no VC++ runtime on Windows; double-click on macOS)
 
 **Build**: Rust + egui. `cargo build --release` (cross-compile Windows via `cargo xwin`).
+
+---
+
+### 许可证 / License
+
+本项目以 MIT 许可证发布，完全免费、可自由使用与修改。版权所有 © 2026 星TAP。
+
+Licensed under the MIT License — free to use and modify. Copyright © 2026 星TAP.
+
+完整条款见仓库根目录 [`LICENSE`](https://github.com/cscb603/retouch-rs/blob/main/LICENSE)。
