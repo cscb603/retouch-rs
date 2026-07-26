@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5">
+<title>初色 — 让你的照片，看起来更专业</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:16px;scroll-behavior:smooth;-webkit-tap-highlight-color:transparent}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Inter","SF Pro Text","Helvetica Neue",system-ui,sans-serif;
+  background:#faf9f7;color:#1a1a1a;line-height:1.6;-webkit-font-smoothing:antialiased;
+  overflow-x:hidden}
+img{max-width:100%}
+a{color:inherit;text-decoration:none}
+.container{max-width:680px;margin:0 auto;padding:0 20px}
+
+/* hero */
+.hero{
+  padding:72px 20px 56px;
+  background:linear-gradient(160deg,#1a1a2e 0%,#16213e 40%,#0f3460 100%);
+  color:#fff;text-align:center;position:relative;overflow:hidden
+}
+.hero::before{
+  content:'';position:absolute;top:-40%;right:-20%;width:400px;height:400px;
+  background:radial-gradient(circle,rgba(99,102,241,.12) 0%,transparent 70%);
+  pointer-events:none
+}
+.hero h1{
+  font-size:2.6rem;font-weight:750;letter-spacing:-.03em;
+  background:linear-gradient(135deg,#fff 30%,#a5b4fc 100%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  background-clip:text
+}
+.hero .sub{
+  font-size:1.1rem;color:#94a3b8;margin-top:12px;max-width:500px;margin-left:auto;margin-right:auto
+}
+.hero .tag{
+  display:inline-block;background:rgba(99,102,241,.2);color:#c7d2fe;
+  padding:6px 16px;border-radius:20px;font-size:.82rem;font-weight:500;margin-bottom:16px
+}
+
+/* tagline highlight */
+.tagline-box{
+  background:linear-gradient(135deg,#fef9c3,#fef3c7);border:1px solid #fde68a;
+  border-radius:14px;padding:18px 20px;margin:24px 0;
+  font-size:1.02rem;font-weight:600;color:#92400e;text-align:center;line-height:1.5
+}
+
+/* stats bar */
+.brag-bar{
+  display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;
+  background:#e2e8f0;border-radius:14px;overflow:hidden;margin:0 0 28px}
+.brag-item{background:#fff;text-align:center;padding:20px 8px}
+.brag-item .num{font-size:1.4rem;font-weight:700;color:#1e293b}
+.brag-item .label{font-size:.82rem;color:#64748b;margin-top:2px}
+section{padding:40px 0}
+section h2{
+  font-size:1.25rem;font-weight:680;margin-bottom:20px;letter-spacing:-.01em;
+  display:flex;align-items:center;gap:8px}
+
+/* why cards */
+.why-grid{display:grid;grid-template-columns:1fr;gap:12px}
+.why-card{
+  background:#fff;border-radius:14px;padding:20px;
+  box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.why-card h3{font-size:1rem;font-weight:650;margin-bottom:4px}
+.why-card p{font-size:.88rem;color:#64748b;line-height:1.5}
+
+/* use case */
+.use-grid{display:grid;grid-template-columns:1fr;gap:10px}
+.use-item{
+  background:#fff;border-radius:12px;padding:16px 18px;
+  box-shadow:0 1px 3px rgba(0,0,0,.04);
+  font-size:.92rem;color:#1e293b;display:flex;align-items:center;gap:10px}
+.use-item .em{font-size:1.2rem;flex-shrink:0}
+
+/* compare table */
+.compare{width:100%;border-collapse:separate;border-spacing:0;font-size:.85rem;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.compare th,.compare td{padding:12px 14px;text-align:center;background:#fff}
+.compare th{background:#1e293b;color:#f8fafc;font-weight:600;font-size:.82rem}
+.compare td{border-bottom:1px solid #f1f5f9}
+.compare .highlight{background:#f0fdf4;font-weight:600}
+
+/* function cards */
+.fn-item{
+  background:#fff;border-radius:10px;padding:14px 16px;margin-bottom:8px;
+  box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.fn-item h3{font-size:.92rem;font-weight:650;color:#0f172a;margin-bottom:2px}
+.fn-item p{font-size:.85rem;color:#64748b;line-height:1.5}
+.fn-item .n{
+  display:inline-block;background:#e0f2fe;color:#0369a1;font-size:.75rem;
+  padding:1px 8px;border-radius:10px;margin-right:4px}
+
+/* install */
+.install-steps{display:flex;flex-direction:column;gap:10px}
+.install-step{
+  background:#fff;border-radius:12px;padding:16px;
+  box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.install-step .step{display:flex;gap:12px;align-items:flex-start}
+.install-step .num{
+  width:26px;height:26px;border-radius:50%;background:#1e293b;color:#fff;
+  display:flex;align-items:center;justify-content:center;
+  font-size:.78rem;font-weight:600;flex-shrink:0;margin-top:1px}
+.install-step p{font-size:.9rem}
+.install-step code{background:#f1f5f9;padding:1px 6px;border-radius:4px;font-size:.85rem}
+
+.box-warn{
+  background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:16px;
+  margin:16px 0;font-size:.88rem;color:#991b1b}
+.box-warn strong{color:#7f1d1d}
+.box-tip{
+  background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:16px;
+  margin:16px 0;font-size:.88rem;color:#1e40af}
+
+footer{
+  background:#1e293b;color:#94a3b8;text-align:center;padding:36px 20px;font-size:.82rem}
+footer .brand{color:#e2e8f0;font-weight:600;font-size:.9rem}
+
+@media(min-width:640px){
+  .why-grid{grid-template-columns:1fr 1fr}
+}
+@media(max-width:420px){
+  .hero h1{font-size:2rem}
+  .brag-bar{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="tag">📸 送给爱拍照的你</div>
+  <h1>让你的照片<br>看起来更专业</h1>
+  <p class="sub">不想学笨重的 PS？不想被手机软件画质限制？<br>初色 —— 30MB，一键出片，全本地运算</p>
+</div>
+
+<div class="container">
+
+<div class="brag-bar">
+  <div class="brag-item"><div class="num">30MB</div><div class="label">安装包</div></div>
+  <div class="brag-item"><div class="num">零元</div><div class="label">永久免费</div></div>
+  <div class="brag-item"><div class="num">贴纸大小</div><div class="label">u 盘就能带走</div></div>
+</div>
+
+<!-- ═══ tagline highlight ═══ -->
+<div class="tagline-box">
+  🎯 初色不是要取代 PS，而是——<br>
+  日常 90% 的修图需求，一个 30MB 的免费 App 就够了。
+</div>
+
+<!-- ═══ why different ═══ -->
+<section>
+  <h2>🤔 这么多软件，为什么选初色？</h2>
+  <div class="why-grid">
+
+    <div class="why-card">
+      <h3>📸 套色 / AI 追色——这个功能 PS 里都没有</h3>
+      <p>导入一张你喜欢的照片——网上的大片、电影截图、大师作品——初色能自动分析它的颜色特征，然后把你的照片调成同样的色调。不是简单的滤镜覆盖，是真的把颜色「算」过来。</p>
+    </div>
+
+    <div class="why-card">
+      <h3>🎨 颜色调出来符合人眼，不像 PS 会毁画质</h3>
+      <p>初色的所有算法都跑在「感知色彩空间」里——不是说人话，是认真的。PS 的线性工具（调对比、拉曲线）容易把阴影和高光的细节拉花、颜色调浓了像塑料。初色不会，增减颜色时你的照片质感还在，阴影高光不崩。</p>
+    </div>
+
+    <div class="why-card">
+      <h3>🐘 PS 太沉了，手机 App 又不够用</h3>
+      <p>4GB 安装包、等半分钟启动、每年上千块订阅。初色 30MB，双击即开，用完即走。手机 App 套滤镜方便但画质压缩、不精确。初色是专业级引擎，但只有 App 的零头大小。</p>
+    </div>
+
+    <div class="why-card">
+      <h3>💡 不懂摄影也能用，懂的人也能调出花</h3>
+      <p>有「一键中性」「自动曝光」「智能去雾」——点一下，灰蒙蒙的照片立刻通透。也有全套专业参数：HSL 分区调色、影调映射 AgX/Filmic、SoftKnee 曲线……想怎么玩都行。</p>
+    </div>
+
+    <div class="why-card">
+      <h3>🎞 胶片感一键出，人像肤色自然好看</h3>
+      <p>内置 6 种经典胶片预设：富士色调、Portra 人像、Kodak Gold……点一下就有故事感。人像有频谱磨皮 + 一键粉嫩，算法识别皮肤区域，不糊背景。</p>
+    </div>
+
+    <div class="why-card">
+      <h3>📐 去杂物、校正透视、批量出片</h3>
+      <p>污点修复能去掉电线杆和痘痘（效果够用）。建筑拍歪了可以拉直透视。最多处理 50 张照片，调完一键批量导出——修的每张参数独立记忆，不混。</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- ═══ what can u do ═══ -->
+<section>
+  <h2>🎬 用初色，你能做什么？</h2>
+  <div class="use-grid">
+    <div class="use-item"><span class="em">🎨</span> <strong>套色追色</strong>：导入一张喜欢的照片，一键克隆它的色调——这是PS、手机App、甚至LR都没有的功能</div>
+    <div class="use-item"><span class="em">☀️</span> 曝光不准、偏色严重 → <strong>点一下「一键中性」</strong>，3 秒校正</div>
+    <div class="use-item"><span class="em">🌅</span> 照片灰蒙蒙 → <strong>去雾滑一下，立刻通透</strong></div>
+    <div class="use-item"><span class="em">🧏</span> 人像皮肤不够好看 → <strong>一键美肤+粉嫩肤色，自然不假</strong></div>
+    <div class="use-item"><span class="em">🎞️</span> 想调出电影感/胶片色 → <strong>套用胶片预设，一键出片</strong></div>
+    <div class="use-item"><span class="em">🌊</span> 天空不够蓝、草不够绿 → <strong>HSL 分区调色，只调一种颜色，不影响其他</strong></div>
+    <div class="use-item"><span class="em">📐</span> 建筑拍歪了、水平线斜了 → <strong>旋转+透视校正，拉直</strong></div>
+    <div class="use-item"><span class="em">📁</span> 一次拍了一堆照片 → <strong>导入相册，逐张调，批量导出</strong></div>
+  </div>
+</section>
+
+<!-- ═══ vs ═══ -->
+<section>
+  <h2>⚖️ 初色 vs 其他工具</h2>
+  <table class="compare">
+    <thead><tr><th style="text-align:left">对比</th><th>初色</th><th>手机修图App</th><th>Photoshop</th></tr></thead>
+    <tbody>
+      <tr><td style="text-align:left">安装包大小</td><td class="highlight">30MB</td><td>200~500MB</td><td>4GB+</td></tr>
+      <tr><td style="text-align:left">价格</td><td class="highlight">免费</td><td>内购/订阅</td><td>¥3xxx/年</td></tr>
+      <tr><td style="text-align:left">感知色彩引擎（不毁画质）</td><td class="highlight">✅ 有</td><td class="">❌ 没有</td><td class="">❌ 线性工具会毁</td></tr>
+      <tr><td style="text-align:left">套色 / AI 追色</td><td class="highlight">✅ 有</td><td class="">❌</td><td class="">❌ PS/LR 也没有</td></tr>
+      <tr><td style="text-align:left">启动速度</td><td class="highlight">瞬间</td><td>几秒</td><td>30秒+</td></tr>
+      <tr><td style="text-align:left">学习成本</td><td class="highlight">低</td><td>低</td><td>高</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══ features ═══ -->
+<section>
+  <h2>📖 功能一览</h2>
+
+  <div class="fn-item">
+    <h3>🎨 套色/AI追色 <span class="n">初色独有</span></h3>
+    <p>导入任何一张喜欢的照片（网上大片、电影截图、大师作品），初色自动分析它的颜色特征，把你的照片调成同样的色调。PS/LR 都没有这个功能。</p>
+  </div>
+  <div class="fn-item">
+    <h3>🧠 感知色彩引擎 <span class="n">核心技术</span></h3>
+    <p>所有算法在 OKLab 感知色彩空间里运行。调亮度、加对比、提饱和——增减时人眼觉得自然舒适，不会像 PS 线性工具那样拉出刺眼的塑料感、把阴影高光细节毁掉。</p>
+  </div>
+  <div class="fn-item">
+    <h3>⚡ 曝光 / 影调</h3>
+    <p>感知曝光（非线性，符合人眼）、AgX/Filmic 电影映射曲线、SoftKnee 胶片曲线（暗部不死黑、高光不死白）、光比融合、去雾。</p>
+  </div>
+  <div class="fn-item">
+    <h3>🌡️ 白平衡</h3>
+    <p>色温（冷↔暖）和色调（绿↔品红）。配合「自动白平衡」一键搞定。也支持「参考图色温匹配」。</p>
+  </div>
+  <div class="fn-item">
+    <h3>🔍 HSL 分区调色</h3>
+    <p>8 种颜色各自独立调。天空不够蓝 → 蓝色组加饱和、降明度。草地太黄 → 绿色组调色相。不会连带影响其他颜色。</p>
+  </div>
+  <div class="fn-item">
+    <h3>🧏 人像美肤</h3>
+    <p>一键美肤 + 粉嫩肤色（去黄/提亮/加红/加粉）+ 频谱磨皮（频率分离技术，保留毛孔细节去斑，比普通磨皮更自然）。</p>
+  </div>
+  <div class="fn-item">
+    <h3>🎞️ 胶片预设</h3>
+    <p>6 种风格：中性胶片·暖/冷、富士色调、Portra 人像、Kodak Gold、莫兰迪·低调。点一下就有故事感。</p>
+  </div>
+  <div class="fn-item">
+    <h3>🤖 智能辅助</h3>
+    <p>一键中性化（分析直方图+色偏，纯算法校正）、自动曝光、自动白平衡、智能去雾、全智能（三合一）。</p>
+  </div>
+  <div class="fn-item">
+    <h3>📐 几何校正</h3>
+    <p>旋转、透视校正、翻转、裁剪（1:1/3:2/4:3/16:9 一键预设）。</p>
+  </div>
+  <div class="fn-item">
+    <h3>📤 导出 & 相册</h3>
+    <p>导出尺寸：原图 / 1080px 朋友圈 / 2048px 高清 / 3000px 印刷。白边边框 / 宝丽来相框可选。相册最多 50 张，参数独立记忆，批量导出。</p>
+  </div>
+</section>
+
+<!-- ═══ install ═══ -->
+<section>
+  <h2>📲 安装</h2>
+
+  <div class="box-warn">
+    <strong>⚠️ Mac 用户第一次打开是这样的：</strong><br>
+    你可能会看到提示说「无法验证开发者」或「已损坏，移到废纸篓」。<br>
+    <strong>这不是软件坏了，也不是病毒。</strong>只是因为 Mac 系统对非 App Store 下载的软件有安全限制，需要手动放行一次。按下面的步骤做就好。
+  </div>
+
+  <div class="install-steps">
+    <div class="install-step">
+      <div class="step">
+        <div class="num">1</div>
+        <p>把 <code>初色.app</code> 拖到「应用程序」文件夹</p>
+      </div>
+    </div>
+    <div class="install-step">
+      <div class="step">
+        <div class="num">2</div>
+        <p><strong>不要双击</strong>——请右键点击 → 选择「打开」→ 弹窗里选「打开」</p>
+      </div>
+    </div>
+    <div class="install-step">
+      <div class="step">
+        <div class="num">3</div>
+        <p>之后就能像普通软件一样双击打开了。弹窗要求「输入密码」是系统在问电脑的管理员密码（不是初色要你钱），正常输入就行。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="box-tip">
+    <strong>💡 如果不小心点了「移到废纸篓」：</strong><br>
+    去废纸篓把它找回来恢复。然后右键 → 打开 → 选打开。没坏，放心。
+    <br><br>
+    <strong>💡 Windows 用户：</strong><br>
+    正常双击安装就能用，没有任何额外步骤。
+  </div>
+</section>
+
+<!-- ═══ cta ═══ -->
+<section style="text-align:center;padding:40px 0">
+  <div style="background:#f1f5f9;border-radius:16px;padding:36px 20px">
+    <h2 style="border:none;justify-content:center;margin-bottom:8px">🎁 现在就试试初色</h2>
+    <p style="font-size:.88rem;color:#64748b">
+      需要 macOS 11.0+（Big Sur 以上）或 Windows<br>
+      从朋友那里拿到 <code>初色.app</code> / <code>初色.exe</code> 即可使用
+    </p>
+  </div>
+</section>
+
+</div>
+
+<footer>
+  <p class="brand">初色 · 星TAP实验室</p>
+  <p style="margin-top:6px">为爱拍照的你而生</p>
+</footer>
+
+</body>
+</html>
