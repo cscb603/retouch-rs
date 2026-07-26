@@ -51,10 +51,18 @@ fn heal_strokes(img: &RgbImage, spot: &SpotFix, poisson: bool, preview: bool) ->
             (10u32, (r / 3).max(2))
         };
         if let Some((sx, sy)) = patchmatch_source_center(&out, cx, cy, r, pm_iters, pm_step) {
-            if poisson {
+            // 检查笔刷 bbox 是否完全在图像内（频域分离 / Poisson 需要完整的局部块）；
+            // 若靠边越界 → 退化为 Telea 兜底（不会静默跳过）。
+            let bbox_ok = cx - r >= 0
+                && cy - r >= 0
+                && cx + r < out.width() as i32
+                && cy + r < out.height() as i32;
+            if bbox_ok && poisson {
                 poisson_heal(&mut out, cx, cy, r, sx, sy, iters);
-            } else {
+            } else if bbox_ok {
                 freqsep_heal(&mut out, cx, cy, r, sx, sy);
+            } else {
+                telea_single(&mut out, cx, cy, r);
             }
         } else {
             telea_single(&mut out, cx, cy, r);

@@ -457,12 +457,9 @@ impl RetouchApp {
     }
 
     /// Look up a `ParamSpec` by field (cloned — cheap, ~40 small structs).
-    fn spec(&self, f: Field) -> ParamSpec {
-        self.params
-            .iter()
-            .find(|s| s.field == f)
-            .cloned()
-            .expect("field present in registry")
+    /// 返回 `None` 表示字段未在注册表中找到（新增 Field 变体但漏注册 registry() 时的安全兜底）。
+    fn spec(&self, f: Field) -> Option<ParamSpec> {
+        self.params.iter().find(|s| s.field == f).cloned()
     }
 
     /// Render one perceptually-mapped slider as a clean vertical block:
@@ -479,7 +476,9 @@ impl RetouchApp {
     /// each with equal, breathable spacing and the slider track filling the
     /// full available width.
     fn param_slider(&mut self, ui: &mut egui::Ui, f: Field) -> bool {
-        let spec = self.spec(f);
+        let Some(spec) = self.spec(f) else {
+            return false;
+        };
         let raw = spec.field.get(&self.adj);
         let pos0 = spec.to_pos(raw);
         let mut pos = if spec.bipolar {
@@ -3647,6 +3646,8 @@ impl RetouchApp {
 
                 // 用「最新几何」把基图转成最终预览（同步、微秒级、不碰颜色管线）。
                 self.rebuild_preview(ctx);
+                // 上式已消费几何变更，清零 dirty_geo 防止接下去的脏几何检查再重复一次预览重建。
+                self.dirty_geo = false;
 
                 // 渲染期间参数又变了，立即追加一次新渲染（基图重算）。
                 if self.dirty {
