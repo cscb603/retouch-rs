@@ -50,13 +50,41 @@ pub struct SceneRules {
 /// 按场景类型返回规则表（不在循环内，一次查表）
 pub const fn scene_rules(st: SceneType) -> SceneRules {
     match st {
-        SceneType::NormalMid => SceneRules { exposure_factor: 1.0, color_factor: 1.0, guard_level: 1 },
-        SceneType::GoldenHour => SceneRules { exposure_factor: 0.8, color_factor: 1.3, guard_level: 0 },
-        SceneType::Overcast => SceneRules { exposure_factor: 1.1, color_factor: 0.9, guard_level: 1 },
-        SceneType::Vivid => SceneRules { exposure_factor: 1.0, color_factor: 0.7, guard_level: 2 },
-        SceneType::FlatLowContrast => SceneRules { exposure_factor: 1.6, color_factor: 1.7, guard_level: 2 },
-        SceneType::Night => SceneRules { exposure_factor: 0.4, color_factor: 0.5, guard_level: 2 },
-        SceneType::Extreme => SceneRules { exposure_factor: 1.4, color_factor: 0.8, guard_level: 2 },
+        SceneType::NormalMid => SceneRules {
+            exposure_factor: 1.0,
+            color_factor: 1.0,
+            guard_level: 1,
+        },
+        SceneType::GoldenHour => SceneRules {
+            exposure_factor: 0.8,
+            color_factor: 1.3,
+            guard_level: 0,
+        },
+        SceneType::Overcast => SceneRules {
+            exposure_factor: 1.1,
+            color_factor: 0.9,
+            guard_level: 1,
+        },
+        SceneType::Vivid => SceneRules {
+            exposure_factor: 1.0,
+            color_factor: 0.7,
+            guard_level: 2,
+        },
+        SceneType::FlatLowContrast => SceneRules {
+            exposure_factor: 1.6,
+            color_factor: 1.7,
+            guard_level: 2,
+        },
+        SceneType::Night => SceneRules {
+            exposure_factor: 0.4,
+            color_factor: 0.5,
+            guard_level: 2,
+        },
+        SceneType::Extreme => SceneRules {
+            exposure_factor: 1.4,
+            color_factor: 0.8,
+            guard_level: 2,
+        },
     }
 }
 
@@ -114,7 +142,10 @@ pub struct ColorPlan {
 impl Default for ColorPlan {
     fn default() -> Self {
         Self {
-            wb: WhiteBalance { temp: 0.0, tint: 0.0 },
+            wb: WhiteBalance {
+                temp: 0.0,
+                tint: 0.0,
+            },
             vibrance_target: 0.0,
             saturation_target: 1.0,
             shadow_chroma_cap: 0.04,
@@ -156,11 +187,7 @@ pub fn analyze_color(img: &DynamicImage, m: &ImageMetrics) -> ColorMetrics {
         let r = raw[3 * i];
         let g = raw[3 * i + 1];
         let b = raw[3 * i + 2];
-        let lin = LinSrgb::new(
-            srgb_to_linear(r),
-            srgb_to_linear(g),
-            srgb_to_linear(b),
-        );
+        let lin = LinSrgb::new(srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b));
         let ok: Oklch<f32> = lin.into_color();
         let l = ok.l;
         let c = ok.chroma;
@@ -204,14 +231,22 @@ pub fn analyze_color(img: &DynamicImage, m: &ImageMetrics) -> ColorMetrics {
 
     let nf = count as f32;
     let mean_c_val = (mean_c / nf as f64) as f32;
-    let shadow_c_val = if shadow_n > 0 { (shadow_c_sum / shadow_n as f64) as f32 } else { 0.0 };
+    let shadow_c_val = if shadow_n > 0 {
+        (shadow_c_sum / shadow_n as f64) as f32
+    } else {
+        0.0
+    };
 
     // cast 方向
     let (cast_hue, cast_chroma) = if cast_n > 0 {
         let ca = (cast_a / cast_n as f64) as f32;
         let cb = (cast_b / cast_n as f64) as f32;
         let cc = (ca * ca + cb * cb).sqrt();
-        let ch = if cc > 0.001 { (-cb).atan2(-ca).to_degrees().rem_euclid(360.0) } else { 0.0 };
+        let ch = if cc > 0.001 {
+            (-cb).atan2(-ca).to_degrees().rem_euclid(360.0)
+        } else {
+            0.0
+        };
         (ch, cc)
     } else {
         (0.0, 0.0)
@@ -225,8 +260,16 @@ pub fn analyze_color(img: &DynamicImage, m: &ImageMetrics) -> ColorMetrics {
     let total = count as f32;
     let sky_ratio = sky_pixels as f32 / total.max(1.0);
     let green_ratio = green_pixels as f32 / total.max(1.0);
-    let mean_sky_h = if sky_pixels > 0 { (sky_h_sum / sky_pixels as f64) as f32 } else { 0.0 };
-    let mean_green_h = if green_pixels > 0 { (green_h_sum / green_pixels as f64) as f32 } else { 0.0 };
+    let mean_sky_h = if sky_pixels > 0 {
+        (sky_h_sum / sky_pixels as f64) as f32
+    } else {
+        0.0
+    };
+    let mean_green_h = if green_pixels > 0 {
+        (green_h_sum / green_pixels as f64) as f32
+    } else {
+        0.0
+    };
 
     // 场景分类
     let scene = classify_scene(m, mean_c_val, cast_hue, cast_chroma, sky_ratio, green_ratio);
@@ -236,7 +279,11 @@ pub fn analyze_color(img: &DynamicImage, m: &ImageMetrics) -> ColorMetrics {
         // 暖场景：目标橙 hue 约 35-45°，当前黄 hue 50-70° 则应补偿
         let warm_target = 40.0;
         let diff = mean_h_val - warm_target;
-        if diff > 5.0 { diff * 0.3 } else { 0.0 } // 只对显著黄的做补偿
+        if diff > 5.0 {
+            diff * 0.3
+        } else {
+            0.0
+        } // 只对显著黄的做补偿
     } else {
         0.0
     };
@@ -245,7 +292,11 @@ pub fn analyze_color(img: &DynamicImage, m: &ImageMetrics) -> ColorMetrics {
     let digital_blue_delta = if sky_pixels > 0 {
         let sky_target = 240.0; // 目标天蓝
         let diff = mean_sky_h - sky_target;
-        if diff.abs() > 5.0 && diff < 0.0 { -diff * 0.25 } else { 0.0 }
+        if diff.abs() > 5.0 && diff < 0.0 {
+            -diff * 0.25
+        } else {
+            0.0
+        }
         // 只对显著偏冷的天空做补偿（向暖拉）
     } else {
         0.0
@@ -274,9 +325,13 @@ fn classify_scene(
     sky_ratio: f32,
     green_ratio: f32,
 ) -> SceneType {
-    let key = if m.tone.median_l < 0.38 { Key::Low }
-              else if m.tone.median_l > 0.62 { Key::High }
-              else { Key::Mid };
+    let key = if m.tone.median_l < 0.38 {
+        Key::Low
+    } else if m.tone.median_l > 0.62 {
+        Key::High
+    } else {
+        Key::Mid
+    };
 
     // 极端高反差（剪影/全长调）
     if m.dynamic_range > 0.60 {
@@ -317,7 +372,7 @@ pub fn color_plan(cm: &ColorMetrics, rules: &SceneRules, strength: f32) -> Color
 
     let vibrance_target = match cm.scene {
         SceneType::FlatLowContrast => (0.15 * cf).min(0.40),
-        SceneType::Vivid => (0.0 * cf).min(0.10),        // 浓图不加
+        SceneType::Vivid => (0.0 * cf).min(0.10), // 浓图不加
         SceneType::Night => (0.05 * cf).min(0.15),
         SceneType::Overcast => (0.08 * cf).min(0.30),
         SceneType::GoldenHour => (0.06 * cf).min(0.20),
@@ -332,7 +387,7 @@ pub fn color_plan(cm: &ColorMetrics, rules: &SceneRules, strength: f32) -> Color
     };
 
     let shadow_chroma_cap = match cm.scene {
-        SceneType::Extreme => 0.03,      // 高反差：极严
+        SceneType::Extreme => 0.03, // 高反差：极严
         SceneType::Night => 0.04,
         SceneType::Vivid => 0.04,
         _ => 0.05,
@@ -358,7 +413,10 @@ pub fn color_plan(cm: &ColorMetrics, rules: &SceneRules, strength: f32) -> Color
 
     // 荧光灯检测：室内中灰绿偏(hue 140-175°, 低彩)
     let fluorescent_fix = if matches!(cm.scene, SceneType::NormalMid | SceneType::Overcast)
-        && cm.cast_hue > 135.0 && cm.cast_hue < 180.0 && cm.cast_chroma > 0.01 && cm.cast_chroma < 0.06
+        && cm.cast_hue > 135.0
+        && cm.cast_hue < 180.0
+        && cm.cast_chroma > 0.01
+        && cm.cast_chroma < 0.06
     {
         (0.40 * cf).min(0.70)
     } else {
@@ -366,8 +424,11 @@ pub fn color_plan(cm: &ColorMetrics, rules: &SceneRules, strength: f32) -> Color
     };
 
     // 阴天冷蓝：偏蓝但饱和度低(logical: overcast场景或mean_c < 0.08且偏蓝)
-    let overcast_warm = if cm.scene == SceneType::Overcast ||
-        (cm.cast_hue > 220.0 && cm.cast_hue < 280.0 && cm.cast_chroma > 0.008 && cm.cast_chroma < 0.05)
+    let overcast_warm = if cm.scene == SceneType::Overcast
+        || (cm.cast_hue > 220.0
+            && cm.cast_hue < 280.0
+            && cm.cast_chroma > 0.008
+            && cm.cast_chroma < 0.05)
     {
         (0.25 * cf).min(0.45)
     } else {
@@ -405,9 +466,13 @@ pub fn apply_color_correction(oklch: &mut Oklch<f32>, plan: &ColorPlan, _orig_c:
             let w = plan.sky_boost * sky_prob;
             let target_h = 242.0;
             let mut dh = target_h - h;
-            if dh > 180.0 { dh -= 360.0; } else if dh < -180.0 { dh += 360.0; }
+            if dh > 180.0 {
+                dh -= 360.0;
+            } else if dh < -180.0 {
+                dh += 360.0;
+            }
             oklch.hue = palette::OklabHue::from_degrees(
-                (h + dh * w * 0.65).rem_euclid(360.0) // ↑0.4→0.65
+                (h + dh * w * 0.65).rem_euclid(360.0), // ↑0.4→0.65
             );
             // 天空彩度：偏紫(purple cast)时降c去紫，正常的偏冷蓝则轻提
             if h < 215.0 || h > 255.0 {
@@ -426,9 +491,13 @@ pub fn apply_color_correction(oklch: &mut Oklch<f32>, plan: &ColorPlan, _orig_c:
             let target_green_h = 118.0;
             if (h - target_green_h).abs() > 12.0 {
                 let mut dh = target_green_h - h;
-                if dh > 180.0 { dh -= 360.0; } else if dh < -180.0 { dh += 360.0; }
+                if dh > 180.0 {
+                    dh -= 360.0;
+                } else if dh < -180.0 {
+                    dh += 360.0;
+                }
                 oklch.hue = palette::OklabHue::from_degrees(
-                    (h + dh * w * 0.55).rem_euclid(360.0) // ↑0.35→0.55
+                    (h + dh * w * 0.55).rem_euclid(360.0), // ↑0.35→0.55
                 );
             }
             // 脏绿（偏高c + 偏色hue）→ 降c洗去数码黄绿脏感
@@ -449,7 +518,7 @@ pub fn apply_color_correction(oklch: &mut Oklch<f32>, plan: &ColorPlan, _orig_c:
         let mut dh = target_warm_h - h;
         if dh.abs() > 1.5 {
             oklch.hue = palette::OklabHue::from_degrees(
-                (h + dh * plan.warm_boost * 0.60).rem_euclid(360.0) // ↑0.3→0.6
+                (h + dh * plan.warm_boost * 0.60).rem_euclid(360.0), // ↑0.3→0.6
             );
             // 提彩度+提亮度：让屎黄变成干净温暖的橙色
             oklch.chroma = (c + plan.warm_boost * 0.04).min(0.20);
@@ -475,9 +544,7 @@ pub fn apply_color_correction(oklch: &mut Oklch<f32>, plan: &ColorPlan, _orig_c:
         if l > 0.20 && l < 0.85 {
             let w = plan.overcast_warm * (1.0 - c / 0.04);
             // 微暖化：蓝→蓝绿方向轻微偏移
-            oklch.hue = palette::OklabHue::from_degrees(
-                (h - 8.0 * w).rem_euclid(360.0)
-            );
+            oklch.hue = palette::OklabHue::from_degrees((h - 8.0 * w).rem_euclid(360.0));
             // 轻提亮度和暖色调感觉
             oklch.l = (l + w * 0.02).min(0.88);
         }
@@ -496,15 +563,21 @@ pub fn apply_color_correction(oklch: &mut Oklch<f32>, plan: &ColorPlan, _orig_c:
 fn sky_probability(h: f32, c: f32, l: f32) -> f32 {
     // hue gaussian
     let dh = (h - 240.0).abs().min(360.0 - (h - 240.0).abs());
-    if dh > 50.0 { return 0.0; }
+    if dh > 50.0 {
+        return 0.0;
+    }
     let hue_w = (-(dh * dh) / (2.0 * 20.0 * 20.0)).exp();
 
     // chroma gate: 蓝天彩度适中
-    if c < 0.02 || c > 0.16 { return 0.0; }
+    if c < 0.02 || c > 0.16 {
+        return 0.0;
+    }
     let chroma_w = if c < 0.04 { (c - 0.02) / 0.02 } else { 1.0 };
 
     // lightness gate: 天空亮度适中
-    if l < 0.30 || l > 0.92 { return 0.0; }
+    if l < 0.30 || l > 0.92 {
+        return 0.0;
+    }
     let l_w = ((l - 0.30) / 0.20).min(1.0) * (1.0 - ((l - 0.80) / 0.12).max(0.0));
 
     (hue_w * chroma_w * l_w).clamp(0.0, 1.0)
@@ -514,13 +587,19 @@ fn sky_probability(h: f32, c: f32, l: f32) -> f32 {
 #[inline]
 fn green_probability(h: f32, c: f32, l: f32) -> f32 {
     let dh = (h - 120.0).abs().min(360.0 - (h - 120.0).abs());
-    if dh > 55.0 { return 0.0; }
+    if dh > 55.0 {
+        return 0.0;
+    }
     let hue_w = (-(dh * dh) / (2.0 * 22.0 * 22.0)).exp();
 
-    if c < 0.03 || c > 0.25 { return 0.0; }
+    if c < 0.03 || c > 0.25 {
+        return 0.0;
+    }
     let chroma_w = if c < 0.06 { (c - 0.03) / 0.03 } else { 1.0 };
 
-    if l < 0.18 || l > 0.90 { return 0.0; }
+    if l < 0.18 || l > 0.90 {
+        return 0.0;
+    }
     let l_w = ((l - 0.18) / 0.15).min(1.0) * (1.0 - ((l - 0.80) / 0.10).max(0.0));
 
     (hue_w * chroma_w * l_w).clamp(0.0, 1.0)
@@ -529,5 +608,9 @@ fn green_probability(h: f32, c: f32, l: f32) -> f32 {
 // Tiny helpers inlined from pipeline
 fn srgb_to_linear(c: u8) -> f32 {
     let v = c as f32 / 255.0;
-    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
 }

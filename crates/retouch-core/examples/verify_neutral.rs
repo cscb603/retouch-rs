@@ -6,7 +6,17 @@ use retouch_core::analyze::analyze;
 use retouch_core::auto::run_auto;
 use std::path::PathBuf;
 
-fn verdict(name: &str, before_mean_l: f32, after_mean_l: f32, before_std: f32, after_std: f32, before_hc: f32, after_hc: f32, before_skin: f32, after_skin: f32) {
+fn verdict(
+    name: &str,
+    before_mean_l: f32,
+    after_mean_l: f32,
+    before_std: f32,
+    after_std: f32,
+    before_hc: f32,
+    after_hc: f32,
+    before_skin: f32,
+    after_skin: f32,
+) {
     let over = after_mean_l > 0.62 || after_hc > before_hc + 0.5;
     // 中性校正本就会降约 25% 对比（与「自动中性化」同源，属正常观感），
     // 只有跌破 50% 才判为真·发灰毁图；其余如实报告降幅。
@@ -20,9 +30,15 @@ fn verdict(name: &str, before_mean_l: f32, after_mean_l: f32, before_std: f32, a
         before_mean_l, after_mean_l, before_std, after_std, std_drop, before_hc, after_hc, before_skin, after_skin,
         if ok { "✅ OK" } else { "❌ FAIL" }
     );
-    if over { println!("    ↳ 过曝/油光: meanL>0.62 或 过曝% 暴涨"); }
-    if washed { println!("    ↳ 发灰毁图: 对比 stdL 崩 >50%"); }
-    if skin_blown { println!("    ↳ 肤色过亮: 肤色L>0.82"); }
+    if over {
+        println!("    ↳ 过曝/油光: meanL>0.62 或 过曝% 暴涨");
+    }
+    if washed {
+        println!("    ↳ 发灰毁图: 对比 stdL 崩 >50%");
+    }
+    if skin_blown {
+        println!("    ↳ 肤色过亮: 肤色L>0.82");
+    }
 }
 
 fn main() {
@@ -39,19 +55,36 @@ fn main() {
         let p = PathBuf::from(a);
         let img = match image::open(&p) {
             Ok(i) => i,
-            Err(e) => { eprintln!("跳过 {}: {}", a, e); continue; }
+            Err(e) => {
+                eprintln!("跳过 {}: {}", a, e);
+                continue;
+            }
         };
         let before = analyze(&img);
         let (out, _res) = run_auto(&img, 1024, 2, 1.0);
         let after = analyze(&image::DynamicImage::ImageRgb8(out));
-        let ok = !(after.tone.mean_l > 0.62 || after.exposure.highlight_clip_pct > before.exposure.highlight_clip_pct + 0.5)
+        let ok = !(after.tone.mean_l > 0.62
+            || after.exposure.highlight_clip_pct > before.exposure.highlight_clip_pct + 0.5)
             && !(after.tone.std_l < before.tone.std_l * 0.5)
             && !(after.skin.mean_l > 0.82);
-        if !ok { fails += 1; }
-        let short = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| a.clone());
-        verdict(&short, before.tone.mean_l, after.tone.mean_l, before.tone.std_l, after.tone.std_l,
-                before.exposure.highlight_clip_pct, after.exposure.highlight_clip_pct,
-                before.skin.mean_l, after.skin.mean_l);
+        if !ok {
+            fails += 1;
+        }
+        let short = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| a.clone());
+        verdict(
+            &short,
+            before.tone.mean_l,
+            after.tone.mean_l,
+            before.tone.std_l,
+            after.tone.std_l,
+            before.exposure.highlight_clip_pct,
+            after.exposure.highlight_clip_pct,
+            before.skin.mean_l,
+            after.skin.mean_l,
+        );
     }
     println!("{}", "-".repeat(120));
     println!("结果: {} 张测试，{} 张 FAIL", args.len(), fails);

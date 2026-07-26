@@ -26,7 +26,6 @@ use crate::color_engine::{apply_color_correction, ColorPlan};
 use crate::detail::{apply_detail, Detail};
 use crate::geometry::{apply_geometry, Geometry};
 
-
 /// Tone-map / shoulder-compression mode applied in the linear-light stage,
 /// right after exposure. This is what replaces the traditional "highlights"
 /// slider that, on linear RGB, produces fake cyan/blue highlights.
@@ -187,9 +186,7 @@ impl SkinTone {
         let hue = base_hue + self.pinken * 6.0 - self.yellow_reduce * 4.0;
         // 彩度严格封顶 ≤0.09：人眼记忆中的健康肤色彩度本就很低（OKLCH C≈0.05–0.09），
         // 旧版 0.10+ 在暖黄皮肤上过饱和 → 显红。去黄降彩度、加粉轻提、加红极轻。
-        let chroma = (self.chroma_target
-            + self.redden * 0.025
-            + self.pinken * 0.015
+        let chroma = (self.chroma_target + self.redden * 0.025 + self.pinken * 0.015
             - self.yellow_reduce * 0.03)
             .clamp(0.03, 0.09);
         let lift = self.light_lift + self.lighten * 0.05;
@@ -238,7 +235,7 @@ fn skin_probability(ok: &Oklch<f32>, smooth: f32) -> f32 {
 /// Apply the skin-tone beautification in OKLCH. Hue is lerped along the shortest
 /// arc; chroma is lerped toward the target (only raises toward healthy, never
 /// introduces fake color); lightness gets a subtle optional lift.
-/// 
+///
 /// `orig` = 原图同像素 OKLCH，用于阴影检测：皮肤区域深影（orig.L < 0.35）时
 /// 做极轻微淡化（+0.02 以内），让浓阴影下的皮肤更通透自然，而非死黑/暗红。
 #[inline]
@@ -809,7 +806,11 @@ fn apply_grade(oklch: &mut Oklch<f32>, g: &Grade, pivot: f32) {
     //    expanded. This is what keeps the default safe on bright / high-key /
     //    backlit images: no over-fit to dark shots, and highlights never clip.
     if g.contrast != 0.0 {
-        let k = if l >= pivot { -g.contrast * 0.15 } else { g.contrast };
+        let k = if l >= pivot {
+            -g.contrast * 0.15
+        } else {
+            g.contrast
+        };
         l = pivot + (l - pivot) * (1.0 + k);
     }
 
@@ -821,7 +822,11 @@ fn apply_grade(oklch: &mut Oklch<f32>, g: &Grade, pivot: f32) {
         let sign = if l > pivot { 1.0 } else { -1.0 };
         let max_d = if pivot > 0.5 { pivot } else { 1.0 - pivot };
         let d = (l - pivot).abs();
-        let k = if l >= pivot { -g.dehaze * 0.15 } else { g.dehaze };
+        let k = if l >= pivot {
+            -g.dehaze * 0.15
+        } else {
+            g.dehaze
+        };
         let new_d = d + k * d * (1.0 - d) * 2.0;
         l = pivot + sign * new_d.clamp(0.0, max_d);
     }
@@ -1168,7 +1173,11 @@ mod tests {
                 }
             }
         }
-        assert!(max_diff <= 2, "OKLCH roundtrip max diff too high: {}", max_diff);
+        assert!(
+            max_diff <= 2,
+            "OKLCH roundtrip max diff too high: {}",
+            max_diff
+        );
     }
 
     /// Identity adjustments must be bit-for-bit equivalent to M0 path.
@@ -1193,10 +1202,21 @@ mod tests {
     fn exposure_brightens() {
         let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, Rgb([100u8, 100, 100])));
         let id = render(&img, &Adjustments::identity());
-        let lit = render(&img, &Adjustments { exposure_ev: 2.0, ..Default::default() });
+        let lit = render(
+            &img,
+            &Adjustments {
+                exposure_ev: 2.0,
+                ..Default::default()
+            },
+        );
         let id_y = id.get_pixel(0, 0).0[0] as f32;
         let lit_y = lit.get_pixel(0, 0).0[0] as f32;
-        assert!(lit_y > id_y + 50.0, "exposure +2EV should brighten a lot ({} vs {})", lit_y, id_y);
+        assert!(
+            lit_y > id_y + 50.0,
+            "exposure +2EV should brighten a lot ({} vs {})",
+            lit_y,
+            id_y
+        );
     }
 
     /// Tone map must compress highlights (anti fake-color).
@@ -1213,7 +1233,11 @@ mod tests {
         let no_tm = render(&red, &Adjustments::identity());
         let agx = render(
             &red,
-            &Adjustments { exposure_ev: 2.0, tone_map: ToneMapMode::Agx, ..Default::default() },
+            &Adjustments {
+                exposure_ev: 2.0,
+                tone_map: ToneMapMode::Agx,
+                ..Default::default()
+            },
         );
         let nt = no_tm.get_pixel(0, 0).0;
         let ax = agx.get_pixel(0, 0).0;
@@ -1233,7 +1257,11 @@ mod tests {
         let curve = ToneMapMode::Filmic.curve().expect("Filmic curve");
         let out = curve.map_rgb([4.0, 1.0, 0.25]);
         for c in out {
-            assert!(c.is_finite() && c >= 0.0 && c <= 1.0 + 1e-4, "filmic out of range: {}", c);
+            assert!(
+                c.is_finite() && c >= 0.0 && c <= 1.0 + 1e-4,
+                "filmic out of range: {}",
+                c
+            );
         }
     }
 
@@ -1303,11 +1331,21 @@ mod tests {
                 ok_out.hue.into_positive_degrees(),
             )
         };
-        assert!(c_out < c_in, "chroma decay should reduce chroma ({} -> {})", c_in, c_out);
+        assert!(
+            c_out < c_in,
+            "chroma decay should reduce chroma ({} -> {})",
+            c_in,
+            c_out
+        );
         // Hue must be essentially unchanged (no fake color). Allow small
         // quantization wobble (< 5 deg).
         let dh = (h_in - h_out).abs().min(360.0 - (h_in - h_out).abs());
-        assert!(dh < 5.0, "hue must not drift under chroma decay ({} vs {})", h_in, h_out);
+        assert!(
+            dh < 5.0,
+            "hue must not drift under chroma decay ({} vs {})",
+            h_in,
+            h_out
+        );
     }
 
     /// Gamut soft-clip must always land inside sRGB and keep hue stable.
@@ -1335,12 +1373,20 @@ mod tests {
         let px = Rgb([128u8, 128, 128]);
         let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, px));
         let adj = Adjustments {
-            white_balance: WhiteBalance { temp: 0.5, tint: 0.0 },
+            white_balance: WhiteBalance {
+                temp: 0.5,
+                tint: 0.0,
+            },
             ..Default::default()
         };
         let out = render(&img, &adj).get_pixel(0, 0).0;
         // temp>0 => R up, B down. So out R must exceed out B.
-        assert!(out[0] > out[2], "warm WB should make R > B (got R={}, B={})", out[0], out[2]);
+        assert!(
+            out[0] > out[2],
+            "warm WB should make R > B (got R={}, B={})",
+            out[0],
+            out[2]
+        );
     }
 
     /// White balance cool (temp<0) must do the opposite (R down, B up).
@@ -1349,11 +1395,19 @@ mod tests {
         let px = Rgb([128u8, 128, 128]);
         let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, px));
         let adj = Adjustments {
-            white_balance: WhiteBalance { temp: -0.5, tint: 0.0 },
+            white_balance: WhiteBalance {
+                temp: -0.5,
+                tint: 0.0,
+            },
             ..Default::default()
         };
         let out = render(&img, &adj).get_pixel(0, 0).0;
-        assert!(out[2] > out[0], "cool WB should make B > R (got R={}, B={})", out[0], out[2]);
+        assert!(
+            out[2] > out[0],
+            "cool WB should make B > R (got R={}, B={})",
+            out[0],
+            out[2]
+        );
     }
 
     /// Saturation > 1 must increase chroma WITHOUT shifting hue (no fake color),
@@ -1368,7 +1422,10 @@ mod tests {
 
         // saturation x2
         let adj = Adjustments {
-            color: ColorGrade { saturation: 2.0, ..Default::default() },
+            color: ColorGrade {
+                saturation: 2.0,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let out = render(&img, &adj).get_pixel(0, 0).0;
@@ -1382,12 +1439,27 @@ mod tests {
             (ci, co, hi, ho)
         };
         // identity color grade leaves chroma unchanged (within quant noise)
-        assert!((c_id - c_in).abs() < 0.004, "color-grade default should be identity (C {} -> {})", c_in, c_id);
+        assert!(
+            (c_id - c_in).abs() < 0.004,
+            "color-grade default should be identity (C {} -> {})",
+            c_in,
+            c_id
+        );
         // saturation x2 boosts chroma
-        assert!(c_out > c_in + 0.004, "saturation x2 should boost chroma ({} -> {})", c_in, c_out);
+        assert!(
+            c_out > c_in + 0.004,
+            "saturation x2 should boost chroma ({} -> {})",
+            c_in,
+            c_out
+        );
         // hue must be stable
         let dh = (h_id - h_out).abs().min(360.0 - (h_id - h_out).abs());
-        assert!(dh < 5.0, "saturation must not shift hue ({} vs {})", h_id, h_out);
+        assert!(
+            dh < 5.0,
+            "saturation must not shift hue ({} vs {})",
+            h_id,
+            h_out
+        );
     }
 
     /// Split-tone must shift shadow hue toward split_shadow, but leave the
@@ -1401,35 +1473,70 @@ mod tests {
         let dark = Rgb([40u8, 10, 80]);
         let bright = Rgb([220u8, 220, 240]);
         let adj = Adjustments {
-            color: ColorGrade { split_shadow: 40.0, split_highlight: 0.0, ..Default::default() },
+            color: ColorGrade {
+                split_shadow: 40.0,
+                split_highlight: 0.0,
+                ..Default::default()
+            },
             ..Default::default()
         };
-        let d_out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, dark)), &adj).get_pixel(0, 0).0;
-        let b_out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, bright)), &adj).get_pixel(0, 0).0;
+        let d_out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, dark)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
+        let b_out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, bright)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
         let h_d = oklch_hue(d_out);
         let h_b = oklch_hue(b_out);
         let h_din = oklch_hue(dark.0);
         // dark pixel hue should move toward split_shadow (positive, clearly > 0)
         let dh_d = (h_d - h_din).rem_euclid(360.0);
         let dh_d_signed = if dh_d > 180.0 { dh_d - 360.0 } else { dh_d };
-        assert!(dh_d_signed > 8.0, "shadow hue should clearly shift toward split_shadow (got {})", dh_d_signed);
+        assert!(
+            dh_d_signed > 8.0,
+            "shadow hue should clearly shift toward split_shadow (got {})",
+            dh_d_signed
+        );
         // bright pixel (highlight) hue should be essentially untouched
         let h_bin = oklch_hue(bright.0);
         let dh_b = (h_b - h_bin).abs().min(360.0 - (h_b - h_bin).abs());
-        assert!(dh_b < 8.0, "highlight hue should be untouched by shadow split (got {})", dh_b);
+        assert!(
+            dh_b < 8.0,
+            "highlight hue should be untouched by shadow split (got {})",
+            dh_b
+        );
         // and shadows must shift MORE than highlights
-        assert!(dh_d_signed > dh_b + 5.0, "shadow should shift more than highlight ({} vs {})", dh_d_signed, dh_b);
+        assert!(
+            dh_d_signed > dh_b + 5.0,
+            "shadow should shift more than highlight ({} vs {})",
+            dh_d_signed,
+            dh_b
+        );
     }
 
     #[inline]
     fn oklch_chroma(px: [u8; 3]) -> f32 {
-        let lin = LinSrgb::new(srgb_to_linear(px[0]), srgb_to_linear(px[1]), srgb_to_linear(px[2]));
+        let lin = LinSrgb::new(
+            srgb_to_linear(px[0]),
+            srgb_to_linear(px[1]),
+            srgb_to_linear(px[2]),
+        );
         let ok: Oklch<f32> = lin.into_color();
         ok.chroma
     }
     #[inline]
     fn oklch_hue(px: [u8; 3]) -> f32 {
-        let lin = LinSrgb::new(srgb_to_linear(px[0]), srgb_to_linear(px[1]), srgb_to_linear(px[2]));
+        let lin = LinSrgb::new(
+            srgb_to_linear(px[0]),
+            srgb_to_linear(px[1]),
+            srgb_to_linear(px[2]),
+        );
         let ok: Oklch<f32> = lin.into_color();
         ok.hue.into_positive_degrees()
     }
@@ -1456,7 +1563,10 @@ mod tests {
         // blue band (index 5) saturation x1.4
         let mut hsl = HslRegions::default();
         hsl.sat_mult[5] = 1.4;
-        let adj = Adjustments { hsl, ..Default::default() };
+        let adj = Adjustments {
+            hsl,
+            ..Default::default()
+        };
         let out = render(&img, &adj).get_pixel(0, 0).0;
 
         let c_out = oklch_chroma(out);
@@ -1470,7 +1580,12 @@ mod tests {
         let h_in = oklch_hue(px.0);
         let h_out = oklch_hue(out);
         let dh = (h_in - h_out).abs().min(360.0 - (h_in - h_out).abs());
-        assert!(dh < 5.0, "blue-band sat must not shift hue ({} vs {})", h_in, h_out);
+        assert!(
+            dh < 5.0,
+            "blue-band sat must not shift hue ({} vs {})",
+            h_in,
+            h_out
+        );
     }
 
     /// Red-band hue rotation must rotate a RED pixel's hue but leave a GREEN
@@ -1485,14 +1600,23 @@ mod tests {
         let green_px = Rgb([40u8, 200, 60]);
         let mut hsl = HslRegions::default();
         hsl.hue_shift[0] = 30.0; // red band rotates +30 deg
-        let adj = Adjustments { hsl, ..Default::default() };
+        let adj = Adjustments {
+            hsl,
+            ..Default::default()
+        };
 
-        let r_out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, red_px)), &adj)
-            .get_pixel(0, 0)
-            .0;
-        let g_out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, green_px)), &adj)
-            .get_pixel(0, 0)
-            .0;
+        let r_out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, red_px)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
+        let g_out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, green_px)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
 
         // red pixel should rotate clearly toward orange (+30 within the band)
         let h_rin = oklch_hue(red_px.0);
@@ -1509,9 +1633,19 @@ mod tests {
         let h_gin = oklch_hue(green_px.0);
         let h_gout = oklch_hue(g_out);
         let dh_g = (h_gin - h_gout).abs().min(360.0 - (h_gin - h_gout).abs());
-        assert!(dh_g < 6.0, "green hue must be untouched by red-band ({} vs {})", h_gin, h_gout);
+        assert!(
+            dh_g < 6.0,
+            "green hue must be untouched by red-band ({} vs {})",
+            h_gin,
+            h_gout
+        );
         // and red must rotate MORE than green
-        assert!(dh_r_s > dh_g + 8.0, "red should rotate more than green ({} vs {})", dh_r_s, dh_g);
+        assert!(
+            dh_r_s > dh_g + 8.0,
+            "red should rotate more than green ({} vs {})",
+            dh_r_s,
+            dh_g
+        );
     }
 
     /// Identity HSL must not change the image at all (M0 round-trip preserved
@@ -1546,12 +1680,18 @@ mod tests {
             skin: st,
             ..Default::default()
         };
-        let s_out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, skin_px)), &adj)
-            .get_pixel(0, 0)
-            .0;
-        let b_out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, blue_px)), &adj)
-            .get_pixel(0, 0)
-            .0;
+        let s_out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, skin_px)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
+        let b_out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, blue_px)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
 
         let h_sin = oklch_hue(skin_px.0);
         let h_sout = oklch_hue(s_out);
@@ -1568,7 +1708,12 @@ mod tests {
         let h_bin = oklch_hue(blue_px.0);
         let h_bout = oklch_hue(b_out);
         let dh = (h_bin - h_bout).abs().min(360.0 - (h_bin - h_bout).abs());
-        assert!(dh < 5.0, "non-skin blue hue must be untouched ({} vs {})", h_bin, h_bout);
+        assert!(
+            dh < 5.0,
+            "non-skin blue hue must be untouched ({} vs {})",
+            h_bin,
+            h_bout
+        );
         assert!(
             (oklch_chroma(blue_px.0) - oklch_chroma(b_out)).abs() < 0.01,
             "non-skin blue chroma must be untouched"
@@ -1583,9 +1728,12 @@ mod tests {
             skin: SkinTone::default(), // enabled = false
             ..Default::default()
         };
-        let out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, px)), &adj)
-            .get_pixel(0, 0)
-            .0;
+        let out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, px)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
         assert_eq!(px.0, out, "disabled skin module must not change the pixel");
     }
 
@@ -1598,9 +1746,12 @@ mod tests {
         let dark = Rgb([25u8, 20, 30]);
         let mut adj = Adjustments::default();
         adj.zones.lift[0] = 0.3; // lift 暗部
-        let out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, dark)), &adj)
-            .get_pixel(0, 0)
-            .0;
+        let out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, dark)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
         assert!(
             out[0] as u32 + out[1] as u32 + out[2] as u32
                 > dark.0[0] as u32 + dark.0[1] as u32 + dark.0[2] as u32,
@@ -1608,9 +1759,12 @@ mod tests {
         );
 
         // identity zone grade
-        let id = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, dark)), &Adjustments::default())
-            .get_pixel(0, 0)
-            .0;
+        let id = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, dark)),
+            &Adjustments::default(),
+        )
+        .get_pixel(0, 0)
+        .0;
         assert_eq!(dark.0, id, "zero zone grade must be identity");
     }
 
@@ -1663,12 +1817,18 @@ mod tests {
         let hi = Rgb([190u8, 190, 190]); // ~0.72 L
         let mut adj = Adjustments::default();
         adj.grade.film_curve = 0.25;
-        let lo_out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, lo)), &adj)
-            .get_pixel(0, 0)
-            .0;
-        let hi_out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, hi)), &adj)
-            .get_pixel(0, 0)
-            .0;
+        let lo_out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, lo)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
+        let hi_out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, hi)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
         // low pixel (below 0.5) should get darker, high pixel brighter
         assert!(
             (lo_out[0] as i32) < (lo.0[0] as i32),
@@ -1685,9 +1845,12 @@ mod tests {
 
         // identity: film_curve = 0 must be no-op
         let id = Adjustments::default();
-        let lo_id = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, lo)), &id)
-            .get_pixel(0, 0)
-            .0;
+        let lo_id = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, lo)),
+            &id,
+        )
+        .get_pixel(0, 0)
+        .0;
         assert_eq!(lo.0, lo_id, "film_curve=0 must be identity");
     }
 
@@ -1699,18 +1862,33 @@ mod tests {
         let hi = Rgb([200u8, 200, 200]);
         let mut adj = Adjustments::default();
         adj.grade.light_ratio = 0.5;
-        let lo_out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, lo)), &adj)
-            .get_pixel(0, 0)
-            .0;
-        let hi_out = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, hi)), &adj)
-            .get_pixel(0, 0)
-            .0;
-        assert!((lo_out[0] as i32) < (lo.0[0] as i32), "light_ratio should deepen shadows");
-        assert!((hi_out[0] as i32) > (hi.0[0] as i32), "light_ratio should lift highlights");
+        let lo_out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, lo)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
+        let hi_out = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, hi)),
+            &adj,
+        )
+        .get_pixel(0, 0)
+        .0;
+        assert!(
+            (lo_out[0] as i32) < (lo.0[0] as i32),
+            "light_ratio should deepen shadows"
+        );
+        assert!(
+            (hi_out[0] as i32) > (hi.0[0] as i32),
+            "light_ratio should lift highlights"
+        );
         let id = Adjustments::default();
-        let lo_id = render(&DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, lo)), &id)
-            .get_pixel(0, 0)
-            .0;
+        let lo_id = render(
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, lo)),
+            &id,
+        )
+        .get_pixel(0, 0)
+        .0;
         assert_eq!(lo.0, lo_id, "light_ratio=0 must be identity");
     }
 

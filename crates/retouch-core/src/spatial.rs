@@ -91,29 +91,33 @@ pub fn gaussian_blur_f32(buf: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
     let k: Vec<f32> = k.iter().map(|v| v / ksum).collect();
 
     let mut tmp = vec![0.0f32; buf.len()];
-    tmp.par_chunks_mut(w as usize).enumerate().for_each(|(y, out_row)| {
-        for x in 0..w as usize {
-            let mut acc = 0.0f32;
-            for (di, &kw) in k.iter().enumerate() {
-                let dx = di as i32 - r;
-                let nx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
-                acc += buf[y * w as usize + nx] * kw;
+    tmp.par_chunks_mut(w as usize)
+        .enumerate()
+        .for_each(|(y, out_row)| {
+            for x in 0..w as usize {
+                let mut acc = 0.0f32;
+                for (di, &kw) in k.iter().enumerate() {
+                    let dx = di as i32 - r;
+                    let nx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                    acc += buf[y * w as usize + nx] * kw;
+                }
+                out_row[x] = acc;
             }
-            out_row[x] = acc;
-        }
-    });
+        });
     let mut dst = vec![0.0f32; buf.len()];
-    dst.par_chunks_mut(w as usize).enumerate().for_each(|(y, out_row)| {
-        for x in 0..w as usize {
-            let mut acc = 0.0f32;
-            for (di, &kw) in k.iter().enumerate() {
-                let dy = di as i32 - r;
-                let ny = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
-                acc += tmp[ny * w as usize + x] * kw;
+    dst.par_chunks_mut(w as usize)
+        .enumerate()
+        .for_each(|(y, out_row)| {
+            for x in 0..w as usize {
+                let mut acc = 0.0f32;
+                for (di, &kw) in k.iter().enumerate() {
+                    let dy = di as i32 - r;
+                    let ny = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                    acc += tmp[ny * w as usize + x] * kw;
+                }
+                out_row[x] = acc;
             }
-            out_row[x] = acc;
-        }
-    });
+        });
     dst
 }
 pub fn blend2(a: &RgbImage, b: &RgbImage, f: impl Fn(f32, f32) -> f32 + Sync + Send) -> RgbImage {

@@ -180,26 +180,28 @@ fn local_std_dev(buf: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
     let r = radius as i32;
     let mut out = vec![0.0f32; n];
 
-    out.par_chunks_mut(w as usize).enumerate().for_each(|(y, row)| {
-        for x in 0..w as usize {
-            let mut sum = 0.0f32;
-            let mut sum2 = 0.0f32;
-            let mut count = 0u32;
-            for dy in -r..=r {
-                let ny = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
-                for dx in -r..=r {
-                    let nx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
-                    let v = buf[ny * w as usize + nx];
-                    sum += v;
-                    sum2 += v * v;
-                    count += 1;
+    out.par_chunks_mut(w as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..w as usize {
+                let mut sum = 0.0f32;
+                let mut sum2 = 0.0f32;
+                let mut count = 0u32;
+                for dy in -r..=r {
+                    let ny = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                    for dx in -r..=r {
+                        let nx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                        let v = buf[ny * w as usize + nx];
+                        sum += v;
+                        sum2 += v * v;
+                        count += 1;
+                    }
                 }
+                let mean = sum / count as f32;
+                let var = (sum2 / count as f32) - mean * mean;
+                row[x] = var.max(0.0).sqrt();
             }
-            let mean = sum / count as f32;
-            let var = (sum2 / count as f32) - mean * mean;
-            row[x] = var.max(0.0).sqrt();
-        }
-    });
+        });
 
     out
 }
@@ -257,57 +259,51 @@ pub fn adaptive_sharpen(img: &DynamicImage, scale: f32, strength: f32) -> Dynami
     // Apply non-linear, scene-aware enhancement to L only.
     let mut l_out = l.clone();
     let strength = strength.clamp(0.0, 1.0);
-    l_out
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, lo)| {
-            let edge = (local_std[i] * 6.0).clamp(0.0, 1.0);
-            // Edges get more boost; flat areas get very little (noise guard).
-            let boost = edge * recipe.edge_boost + (1.0 - edge) * (gain * 0.20);
+    l_out.par_iter_mut().enumerate().for_each(|(i, lo)| {
+        let edge = (local_std[i] * 6.0).clamp(0.0, 1.0);
+        // Edges get more boost; flat areas get very little (noise guard).
+        let boost = edge * recipe.edge_boost + (1.0 - edge) * (gain * 0.20);
 
-            // Non-linear soft-clipping: tanh prevents overshoot / ringing.
-            let h = dog[i];
-            let enhanced = h * boost;
-            let soft = (h * boost * 2.5).tanh() * 0.4;
-            let mixed = enhanced * 0.55 + soft * 0.45;
+        // Non-linear soft-clipping: tanh prevents overshoot / ringing.
+        let h = dog[i];
+        let enhanced = h * boost;
+        let soft = (h * boost * 2.5).tanh() * 0.4;
+        let mixed = enhanced * 0.55 + soft * 0.45;
 
-            // Luminance protection: less sharpening near blacks and whites.
-            let luma_w = 1.0 - (l[i] - 0.5).abs() * 2.0 * recipe.luma_protect;
-            let luma_w = luma_w.clamp(0.15, 1.0);
+        // Luminance protection: less sharpening near blacks and whites.
+        let luma_w = 1.0 - (l[i] - 0.5).abs() * 2.0 * recipe.luma_protect;
+        let luma_w = luma_w.clamp(0.15, 1.0);
 
-            // Skin protection (only when classified as portrait and pixel looks skin-like).
-            let skin_w = if recipe.skin_protect > 0.0 {
-                let c = (a[i] * a[i] + b[i] * b[i]).sqrt();
-                let hdeg = a[i].atan2(b[i]).to_degrees().rem_euclid(360.0);
-                let is_skin = (10.0..75.0).contains(&hdeg)
-                    && c > 0.03
-                    && c < 0.25
-                    && (0.35..0.85).contains(&l[i]);
-                if is_skin {
-                    1.0 - recipe.skin_protect
-                } else {
-                    1.0
-                }
+        // Skin protection (only when classified as portrait and pixel looks skin-like).
+        let skin_w = if recipe.skin_protect > 0.0 {
+            let c = (a[i] * a[i] + b[i] * b[i]).sqrt();
+            let hdeg = a[i].atan2(b[i]).to_degrees().rem_euclid(360.0);
+            let is_skin = (10.0..75.0).contains(&hdeg)
+                && c > 0.03
+                && c < 0.25
+                && (0.35..0.85).contains(&l[i]);
+            if is_skin {
+                1.0 - recipe.skin_protect
             } else {
                 1.0
-            };
+            }
+        } else {
+            1.0
+        };
 
-            *lo = (l[i] + mixed * luma_w * skin_w * strength).clamp(0.0, 1.0);
-        });
+        *lo = (l[i] + mixed * luma_w * skin_w * strength).clamp(0.0, 1.0);
+    });
 
     // Reconstruct RGB from OKLab.
     let mut out_rgb = ImageBuffer::new(w, h);
-    out_rgb
-        .par_chunks_mut(3)
-        .enumerate()
-        .for_each(|(i, px)| {
-            let ok = Oklab::new(l_out[i], a[i], b[i]);
-            let lin: LinSrgb<f32> = ok.into_color();
-            let (r, g, b) = lin.into_components();
-            px[0] = linear_to_srgb(r);
-            px[1] = linear_to_srgb(g);
-            px[2] = linear_to_srgb(b);
-        });
+    out_rgb.par_chunks_mut(3).enumerate().for_each(|(i, px)| {
+        let ok = Oklab::new(l_out[i], a[i], b[i]);
+        let lin: LinSrgb<f32> = ok.into_color();
+        let (r, g, b) = lin.into_components();
+        px[0] = linear_to_srgb(r);
+        px[1] = linear_to_srgb(g);
+        px[2] = linear_to_srgb(b);
+    });
 
     DynamicImage::ImageRgb8(out_rgb)
 }

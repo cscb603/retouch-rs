@@ -7,8 +7,8 @@
 //! dependency). A `Geometry` that is `is_identity()` returns the input image
 //! untouched, so an identity adjustment preserves the M0 pixel-exact round-trip.
 
-use image::{DynamicImage, Rgb, RgbImage};
 use image::imageops;
+use image::{DynamicImage, Rgb, RgbImage};
 
 /// Geometry preprocessing controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -294,11 +294,7 @@ fn solve_homography(src: &[(f32, f32); 4], dst: &[(f32, f32); 4]) -> Option<[[f6
     let h = [
         a[0][8], a[1][8], a[2][8], a[3][8], a[4][8], a[5][8], a[6][8], a[7][8],
     ];
-    Some([
-        [h[0], h[1], h[2]],
-        [h[3], h[4], h[5]],
-        [h[6], h[7], 1.0],
-    ])
+    Some([[h[0], h[1], h[2]], [h[3], h[4], h[5]], [h[6], h[7], 1.0]])
 }
 
 /// Invert a 3x3 matrix.
@@ -466,11 +462,9 @@ mod tests {
     /// 这正是 GUI「几何预处理」菜单全部控件叠加的极端路径。
     #[test]
     fn combined_geometry_all_active_no_panic() {
-        let img = mk(37, 53, |x, y| [
-            (x * 6) as u8,
-            (y * 4) as u8,
-            ((x + y) * 3) as u8,
-        ]);
+        let img = mk(37, 53, |x, y| {
+            [(x * 6) as u8, (y * 4) as u8, ((x + y) * 3) as u8]
+        });
         let mut g = Geometry::default();
         g.quarter_turns = 1; // 逆时针 90°
         g.rotate_deg = 12.0; // 非 90 整数倍的任意角 → 走 warp_rotate + 裁黑角

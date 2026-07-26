@@ -11,11 +11,11 @@
 
 use crate::geometry::{apply_geometry, Geometry};
 use crate::pipeline::{render, Adjustments};
-use crate::spot::SpotFix;
 use crate::sharpen;
+use crate::spot::SpotFix;
 use image::{
-    imageops, DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgba,
-    codecs::jpeg::JpegEncoder,
+    codecs::jpeg::JpegEncoder, imageops, DynamicImage, GenericImageView, ImageBuffer, ImageFormat,
+    Rgba,
 };
 use std::io::Cursor;
 use std::path::Path;
@@ -290,17 +290,26 @@ fn add_border(img: &DynamicImage, style: &BorderStyle, corner_radius: Option<f32
             // 内角圆角：创建圆角遮罩，将照片边缘柔化
             if let Some(r) = corner_radius {
                 let r = r.round() as u32;
-                if r > 0 && r < w/2 && r < h/2 {
+                if r > 0 && r < w / 2 && r < h / 2 {
                     for y in 0..h {
                         for x in 0..w {
                             // 四个角的距离判断
-                            let in_corner = (x < r && y < r && !in_rounded_rect(x, y, r, w, h, true, true))
-                                || (x >= w - r && y < r && !in_rounded_rect(x, y, r, w, h, false, true))
-                                || (x < r && y >= h - r && !in_rounded_rect(x, y, r, w, h, true, false))
-                                || (x >= w - r && y >= h - r && !in_rounded_rect(x, y, r, w, h, false, false));
+                            let in_corner =
+                                (x < r && y < r && !in_rounded_rect(x, y, r, w, h, true, true))
+                                    || (x >= w - r
+                                        && y < r
+                                        && !in_rounded_rect(x, y, r, w, h, false, true))
+                                    || (x < r
+                                        && y >= h - r
+                                        && !in_rounded_rect(x, y, r, w, h, true, false))
+                                    || (x >= w - r
+                                        && y >= h - r
+                                        && !in_rounded_rect(x, y, r, w, h, false, false));
                             if in_corner {
                                 // 角落像素混入白色
-                                if let Some(p) = canvas.get_pixel_mut_checked(paste_x + x, paste_y + y) {
+                                if let Some(p) =
+                                    canvas.get_pixel_mut_checked(paste_x + x, paste_y + y)
+                                {
                                     let t = 1.0; // 完全替换为白
                                     p.0[0] = 255;
                                     p.0[1] = 255;
@@ -322,11 +331,7 @@ fn add_border(img: &DynamicImage, style: &BorderStyle, corner_radius: Option<f32
 // ──────────────────────────────────────────────
 
 /// 编码输出并注入 EXIF + DPI 元数据
-fn encode_output(
-    img: &DynamicImage,
-    cfg: &ExportConfig,
-    source_path: Option<&Path>,
-) -> Vec<u8> {
+fn encode_output(img: &DynamicImage, cfg: &ExportConfig, source_path: Option<&Path>) -> Vec<u8> {
     match cfg.output_format {
         OutputFormat::Jpeg => encode_jpeg(img, cfg, source_path),
         OutputFormat::Png => encode_png(img),
@@ -344,7 +349,9 @@ fn encode_jpeg(img: &DynamicImage, cfg: &ExportConfig, source_path: Option<&Path
     let mut base_jpeg = Vec::new();
     {
         let mut encoder = JpegEncoder::new_with_quality(&mut base_jpeg, cfg.quality);
-        encoder.encode(raw, w, h, image::ExtendedColorType::Rgb8).ok();
+        encoder
+            .encode(raw, w, h, image::ExtendedColorType::Rgb8)
+            .ok();
     }
 
     // 2. 从源文件提取 EXIF（APP1 段）
@@ -355,11 +362,7 @@ fn encode_jpeg(img: &DynamicImage, cfg: &ExportConfig, source_path: Option<&Path
 }
 
 /// 构建含 DPI 和 EXIF 的完整 JPEG 字节流
-fn build_jpeg_with_metadata(
-    base_jpeg: &[u8],
-    exif_data: Option<&[u8]>,
-    dpi: u32,
-) -> Vec<u8> {
+fn build_jpeg_with_metadata(base_jpeg: &[u8], exif_data: Option<&[u8]>, dpi: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(base_jpeg.len() + 2048);
 
     // SOI (Start of Image)

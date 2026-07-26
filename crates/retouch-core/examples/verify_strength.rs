@@ -11,7 +11,10 @@ use retouch_core::tonemap::classify_tonality;
 fn delta_rms(a: &DynamicImage, b: &DynamicImage) -> f32 {
     let a = a.to_rgb8();
     let b = b.to_rgb8();
-    let (w, h) = (a.dimensions().0.min(b.dimensions().0), a.dimensions().1.min(b.dimensions().1));
+    let (w, h) = (
+        a.dimensions().0.min(b.dimensions().0),
+        a.dimensions().1.min(b.dimensions().1),
+    );
     let mut s = 0.0f64;
     let mut n = 0.0f64;
     for y in (0..h).step_by(2) {
@@ -59,7 +62,11 @@ fn main() {
             let m = analyze(&out_d);
             let rms = delta_rms(&img, &out_d);
             let art = is_artifact(&m, &base, &t);
-            let mono = if rms > prev_rms { "✓单调递增" } else { "✗非递增" };
+            let mono = if rms > prev_rms {
+                "✓单调递增"
+            } else {
+                "✗非递增"
+            };
             prev_rms = rms;
             println!(
                 "  {} (s={:.1}) RMS={:6.2} {} | median={:.3} std={:.3} mc={:.3} hiClip={:5.2} | 伪影={}",

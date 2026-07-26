@@ -13,17 +13,19 @@
 use eframe::egui;
 use image::GenericImageView;
 use palette::{IntoColor, LinSrgb, Oklab};
+use retouch_agent::{thumb_b64, QwenClient};
 use retouch_core::analyze::{analyze, ImageMetrics};
 use retouch_core::auto::{run_auto, AutoResult};
 use retouch_core::auto_color::{auto_neutral_balance, film_presets};
-use retouch_core::params::{registry, Field, ParamSpec};
 use retouch_core::geometry::{apply_geometry, Geometry};
-use retouch_core::pipeline::{render, Adjustments, HslRegions, SkinTone, ToneMapMode, smart_beauty_preset};
+use retouch_core::params::{registry, Field, ParamSpec};
+use retouch_core::pipeline::{
+    render, smart_beauty_preset, Adjustments, HslRegions, SkinTone, ToneMapMode,
+};
 use retouch_core::preset::{dump_preset, load_preset, Preset};
 use retouch_core::reference::run_reference_match;
 use retouch_core::spot::{HealMode, SpotFix};
 use retouch_core::tonemap::tonal_adjustments;
-use retouch_agent::{thumb_b64, QwenClient};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -285,7 +287,10 @@ struct Album {
 
 impl Album {
     fn new() -> Self {
-        Self { slots: Vec::new(), active_idx: 0 }
+        Self {
+            slots: Vec::new(),
+            active_idx: 0,
+        }
     }
     fn is_empty(&self) -> bool {
         self.slots.is_empty()
@@ -328,7 +333,9 @@ impl RetouchApp {
                 let scale = (req.preview_max as f32 / w.max(h) as f32).min(1.0);
                 let tw = (w as f32 * scale) as u32;
                 let th = (h as f32 * scale) as u32;
-                let thumb = req.src.resize(tw, th, image::imageops::FilterType::Triangle);
+                let thumb = req
+                    .src
+                    .resize(tw, th, image::imageops::FilterType::Triangle);
 
                 // 渲染出错（如极端参数导致 panic）不会炸掉整个 app：
                 // catch_unwind 捕获后跳过本轮渲染，app 继续运行。
@@ -475,7 +482,11 @@ impl RetouchApp {
         let spec = self.spec(f);
         let raw = spec.field.get(&self.adj);
         let pos0 = spec.to_pos(raw);
-        let mut pos = if spec.bipolar { pos0 } else { (pos0 + 1.0) * 0.5 };
+        let mut pos = if spec.bipolar {
+            pos0
+        } else {
+            (pos0 + 1.0) * 0.5
+        };
         let range = if spec.bipolar { -1.0..=1.0 } else { 0.0..=1.0 };
 
         ui.vertical(|ui| {
@@ -583,7 +594,10 @@ impl RetouchApp {
         let t = (pos + 1.0) * 0.5; // normalize bipolar→[0,1]
         let tick_x = bar_left + t.clamp(0.0, 1.0) * bar.width();
         painter.line_segment(
-            [egui::pos2(tick_x, bar.top() - 2.0), egui::pos2(tick_x, bar.bottom() + 2.0)],
+            [
+                egui::pos2(tick_x, bar.top() - 2.0),
+                egui::pos2(tick_x, bar.bottom() + 2.0),
+            ],
             (1.5, egui::Color32::WHITE),
         );
     }
@@ -596,7 +610,9 @@ impl RetouchApp {
         let scale = (512.0 / w.max(h) as f32).min(1.0);
         let tw = (w as f32 * scale) as u32;
         let th = (h as f32 * scale) as u32;
-        let img = src.resize(tw, th, image::imageops::FilterType::Triangle).to_rgb8();
+        let img = src
+            .resize(tw, th, image::imageops::FilterType::Triangle)
+            .to_rgb8();
         let mut n = 0u32;
         let mut sl = 0.0f64;
         let mut sa = 0.0f64;
@@ -644,7 +660,10 @@ impl RetouchApp {
             self.adj.white_balance.temp = (-a * 3.0).clamp(-1.0, 1.0);
             self.adj.white_balance.tint = (-b * 3.0).clamp(-1.0, 1.0);
             self.dirty = true;
-            self.status = format!("自动白平衡 (色温 {:.2} / 色调 {:.2})", self.adj.white_balance.temp, self.adj.white_balance.tint);
+            self.status = format!(
+                "自动白平衡 (色温 {:.2} / 色调 {:.2})",
+                self.adj.white_balance.temp, self.adj.white_balance.tint
+            );
         } else {
             self.status = "请先打开图片".into();
         }
@@ -768,7 +787,9 @@ impl RetouchApp {
             std::env::var("DASHSCOPE_API_KEY").unwrap_or_default()
         };
         if key.is_empty() {
-            self.status = "生成作品名需 Qwen(DashScope) Key：填下方「作品名设置」或 export DASHSCOPE_API_KEY".into();
+            self.status =
+                "生成作品名需 Qwen(DashScope) Key：填下方「作品名设置」或 export DASHSCOPE_API_KEY"
+                    .into();
             return;
         }
         let path = self.src_path.clone().unwrap();
@@ -789,7 +810,11 @@ impl RetouchApp {
                 .unwrap_or_default();
             match QwenClient::new(key).review(&b64, &mjson, &summary) {
                 Ok(v) => {
-                    let title = v.get("title").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let title = v
+                        .get("title")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let comment = v
                         .get("comment")
                         .and_then(|s| s.as_str())
@@ -846,6 +871,13 @@ impl RetouchApp {
         a
     }
 
+    /// 替换整组参数时死保用户几何（旋转/裁剪/翻转）。一键美颜、一键中性、
+    /// 亮度还原、应用预设等路径都应走它，否则 `to_adjustments()`(写死 geometry 默认)
+    /// / `blend_adj()`(geometry 不在注册表) 会把几何清零，导致"调别的参数旋转又回来"。
+    fn replace_adj_preserve_geo(&mut self, new: Adjustments) {
+        self.adj = preserve_geometry(&self.adj, new);
+    }
+
     fn poll_auto(&mut self) {
         if !self.auto_running {
             return;
@@ -871,7 +903,7 @@ impl RetouchApp {
             } else {
                 1.0
             };
-            self.adj = Self::blend_adj(&self.adj, &auto_adj, s);
+            self.replace_adj_preserve_geo(Self::blend_adj(&self.adj, &auto_adj, s));
             // 一键中性模式：按曝光还原滑块重新调整亮度（保留颜色校正）
             if auto_mode == AutoMode::Neutral {
                 self.reapply_exposure_restore();
@@ -900,17 +932,23 @@ impl RetouchApp {
     /// 用非线性 `cubic\_ease` 做感知均匀的亮度回退（保留颜色/白平衡不变）。
     /// 调用时机：poll_auto 存好基线后 / exposure_restore 滑块变化时。
     fn reapply_exposure_restore(&mut self) {
-        let Some(ref baseline) = self.auto_baseline.clone() else { return };
+        let Some(ref baseline) = self.auto_baseline.clone() else {
+            return;
+        };
         let r = self.exposure_restore.clamp(0.0, 1.0);
         if r <= 0.0 {
-            self.adj = baseline.clone();
+            self.replace_adj_preserve_geo(baseline.clone());
             self.dirty = true;
             return;
         }
         // cubic ease：人眼感知均匀的缓入缓出，避免前半程太猛、后半程太弱
         let r3 = r * r * (3.0 - 2.0 * r);
         // 按原图影调细分回退强度：低调(暗)→保住暗部氛围弱回退；常规→适中；高调(亮)→强回退
-        let orig_med = self.img_metrics.as_ref().map(|m| m.tone.median_l).unwrap_or(0.5);
+        let orig_med = self
+            .img_metrics
+            .as_ref()
+            .map(|m| m.tone.median_l)
+            .unwrap_or(0.5);
         let style_weight = if orig_med < 0.38 {
             0.45 // 低调：暗是氛围，弱回退
         } else if orig_med > 0.58 {
@@ -922,14 +960,14 @@ impl RetouchApp {
 
         let mut a = baseline.clone();
         a.exposure_ev *= mul;
-        a.grade.contrast *= mul.max(0.3);  // 对比至少保留 30%
+        a.grade.contrast *= mul.max(0.3); // 对比至少保留 30%
         a.grade.film_curve *= (1.0 - r3 * style_weight * 0.7).max(0.0);
         a.grade.dehaze *= (1.0 - r3 * style_weight * 0.6).max(0.0);
         a.grade.light_ratio *= (1.0 - r3 * style_weight * 0.6).max(0.0);
         a.grade.shadow_lift *= (1.0 - r3 * style_weight * 0.8).max(0.0);
         a.grade.deep_shadow_lift *= (1.0 - r3 * style_weight * 0.8).max(0.0);
         // 颜色/白平衡/色调映射等从基线保留不变
-        self.adj = a;
+        self.replace_adj_preserve_geo(a);
         self.dirty = true;
     }
 
@@ -965,7 +1003,12 @@ impl RetouchApp {
                             }
                         }
                         if let TargetSize::Custom(v) = &mut self.export_cfg.target_size {
-                            ui.add(egui::DragValue::new(v).range(100..=10000).speed(10.0).suffix(" px"));
+                            ui.add(
+                                egui::DragValue::new(v)
+                                    .range(100..=10000)
+                                    .speed(10.0)
+                                    .suffix(" px"),
+                            );
                         } else if ui.button("自定义").clicked() {
                             self.export_cfg.target_size = TargetSize::Custom(3000);
                         }
@@ -978,7 +1021,8 @@ impl RetouchApp {
                         ui.label(egui::RichText::new("格式").strong());
                         let fmts = [OutputFormat::Jpeg, OutputFormat::Png];
                         for fmt in &fmts {
-                            let sel = std::mem::discriminant(&self.export_cfg.output_format) == std::mem::discriminant(fmt);
+                            let sel = std::mem::discriminant(&self.export_cfg.output_format)
+                                == std::mem::discriminant(fmt);
                             if ui.selectable_label(sel, fmt.label()).clicked() {
                                 self.export_cfg.output_format = *fmt;
                             }
@@ -986,7 +1030,9 @@ impl RetouchApp {
                         if self.export_cfg.output_format == OutputFormat::Jpeg {
                             ui.add_space(8.0);
                             ui.label("JPEG");
-                            ui.add(egui::Slider::new(&mut self.export_cfg.quality, 50..=100).text(""));
+                            ui.add(
+                                egui::Slider::new(&mut self.export_cfg.quality, 50..=100).text(""),
+                            );
                         }
                     });
 
@@ -1046,10 +1092,16 @@ impl RetouchApp {
                     ui.checkbox(&mut self.export_cfg.smart_sharpen, "智能锐化")
                         .on_hover_text("缩图后自适应锐化：人像护肤色，风景强纹理，纯色低强度");
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format!("DPI:{}", self.export_cfg.dpi))
-                            .size(12.0).color(egui::Color32::from_gray(140)));
-                        ui.label(egui::RichText::new("sRGB")
-                            .size(12.0).color(egui::Color32::from_gray(140)));
+                        ui.label(
+                            egui::RichText::new(format!("DPI:{}", self.export_cfg.dpi))
+                                .size(12.0)
+                                .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.label(
+                            egui::RichText::new("sRGB")
+                                .size(12.0)
+                                .color(egui::Color32::from_gray(140)),
+                        );
                     });
 
                     ui.add_space(6.0);
@@ -1058,7 +1110,10 @@ impl RetouchApp {
 
                     // ── 保存按钮 + 取消（同行） ──
                     ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new("保存").min_size(egui::vec2(120.0, 32.0))).clicked() {
+                        if ui
+                            .add(egui::Button::new("保存").min_size(egui::vec2(120.0, 32.0)))
+                            .clicked()
+                        {
                             let ext = self.export_cfg.output_format.ext();
                             let default_name = {
                                 if let Some(t) = &self.last_title {
@@ -1067,7 +1122,10 @@ impl RetouchApp {
                                     let title = &t[start..end.min(t.len())];
                                     title.trim().to_string()
                                 } else if let Some(p) = &self.src_path {
-                                    p.file_stem().unwrap_or_default().to_string_lossy().to_string()
+                                    p.file_stem()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string()
                                 } else {
                                     "photo".to_string()
                                 }
@@ -1116,7 +1174,11 @@ impl RetouchApp {
         );
         match std::fs::write(path, &data) {
             Ok(()) => {
-                format!("✅ 已导出 -> {}（{} KB）", path.display(), data.len() / 1024)
+                format!(
+                    "✅ 已导出 -> {}（{} KB）",
+                    path.display(),
+                    data.len() / 1024
+                )
             }
             Err(e) => format!("❌ 保存失败: {}", e),
         }
@@ -1125,8 +1187,8 @@ impl RetouchApp {
     /// 导入（多选）：相册批处理的入口。选 1..N 张，仅生成 ≤512px 缩略图，
     /// 不全解码原图进内存。导入即用「上一张参数」作起点（首张用照片默认）。
     fn open(&mut self) {
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter("图片", &["jpg", "jpeg", "png", "tif", "tiff"]);
+        let mut dialog =
+            rfd::FileDialog::new().add_filter("图片", &["jpg", "jpeg", "png", "tif", "tiff"]);
         if let Some(dir) = &self.last_open_dir {
             dialog = dialog.set_directory(dir);
         }
@@ -1418,7 +1480,14 @@ impl RetouchApp {
                     Ok(Ok(())) => ok += 1,
                     _ => fail += 1,
                 }
-                if tx.send(ExportMsg::Step { done: i + 1, ok, fail }).is_err() {
+                if tx
+                    .send(ExportMsg::Step {
+                        done: i + 1,
+                        ok,
+                        fail,
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -1488,7 +1557,7 @@ impl RetouchApp {
         {
             match load_preset(&path) {
                 Ok(p) => {
-                    self.adj = p.to_adjustments();
+                    self.replace_adj_preserve_geo(p.to_adjustments());
                     self.dirty = true;
                     self.dirty_geo = true;
                     self.status = format!("已加载预设 {}", path.display());
@@ -1555,55 +1624,96 @@ impl RetouchApp {
                 }
             }
             "exposure" | "exp" => {
-                self.status = Self::set_f32(&mut self.adj.exposure_ev, t.get(1).copied(), -3.0, 3.0);
+                self.status =
+                    Self::set_f32(&mut self.adj.exposure_ev, t.get(1).copied(), -3.0, 3.0);
                 self.dirty = true;
             }
             "contrast" => {
-                self.status = Self::set_f32(&mut self.adj.grade.contrast, t.get(1).copied(), -1.0, 1.0);
+                self.status =
+                    Self::set_f32(&mut self.adj.grade.contrast, t.get(1).copied(), -1.0, 1.0);
                 self.dirty = true;
             }
             "brightness" => {
-                self.status = Self::set_f32(&mut self.adj.grade.brightness_lift, t.get(1).copied(), 0.0, 1.0);
+                self.status = Self::set_f32(
+                    &mut self.adj.grade.brightness_lift,
+                    t.get(1).copied(),
+                    0.0,
+                    1.0,
+                );
                 self.dirty = true;
             }
             "dehaze" => {
-                self.status = Self::set_f32(&mut self.adj.grade.dehaze, t.get(1).copied(), 0.0, 1.0);
+                self.status =
+                    Self::set_f32(&mut self.adj.grade.dehaze, t.get(1).copied(), 0.0, 1.0);
                 self.dirty = true;
             }
             "shadow" => {
-                self.status = Self::set_f32(&mut self.adj.grade.shadow_lift, t.get(1).copied(), 0.0, 1.0);
+                self.status =
+                    Self::set_f32(&mut self.adj.grade.shadow_lift, t.get(1).copied(), 0.0, 1.0);
                 self.dirty = true;
             }
             "deepshadow" => {
-                self.status = Self::set_f32(&mut self.adj.grade.deep_shadow_lift, t.get(1).copied(), 0.0, 1.0);
+                self.status = Self::set_f32(
+                    &mut self.adj.grade.deep_shadow_lift,
+                    t.get(1).copied(),
+                    0.0,
+                    1.0,
+                );
                 self.dirty = true;
             }
             "wb" | "temp" => {
-                self.status = Self::set_f32(&mut self.adj.white_balance.temp, t.get(1).copied(), -1.0, 1.0);
+                self.status = Self::set_f32(
+                    &mut self.adj.white_balance.temp,
+                    t.get(1).copied(),
+                    -1.0,
+                    1.0,
+                );
                 self.dirty = true;
             }
             "tint" => {
-                self.status = Self::set_f32(&mut self.adj.white_balance.tint, t.get(1).copied(), -1.0, 1.0);
+                self.status = Self::set_f32(
+                    &mut self.adj.white_balance.tint,
+                    t.get(1).copied(),
+                    -1.0,
+                    1.0,
+                );
                 self.dirty = true;
             }
             "sat" | "saturation" => {
-                self.status = Self::set_f32(&mut self.adj.color.saturation, t.get(1).copied(), 0.0, 3.0);
+                self.status =
+                    Self::set_f32(&mut self.adj.color.saturation, t.get(1).copied(), 0.0, 3.0);
                 self.dirty = true;
             }
             "vibrance" => {
-                self.status = Self::set_f32(&mut self.adj.color.vibrance, t.get(1).copied(), -1.0, 1.0);
+                self.status =
+                    Self::set_f32(&mut self.adj.color.vibrance, t.get(1).copied(), -1.0, 1.0);
                 self.dirty = true;
             }
             "hue" | "huerotate" => {
-                self.status = Self::set_f32(&mut self.adj.color.hue_rotate, t.get(1).copied(), -180.0, 180.0);
+                self.status = Self::set_f32(
+                    &mut self.adj.color.hue_rotate,
+                    t.get(1).copied(),
+                    -180.0,
+                    180.0,
+                );
                 self.dirty = true;
             }
             "splitshadow" => {
-                self.status = Self::set_f32(&mut self.adj.color.split_shadow, t.get(1).copied(), -180.0, 180.0);
+                self.status = Self::set_f32(
+                    &mut self.adj.color.split_shadow,
+                    t.get(1).copied(),
+                    -180.0,
+                    180.0,
+                );
                 self.dirty = true;
             }
             "splithighlight" => {
-                self.status = Self::set_f32(&mut self.adj.color.split_highlight, t.get(1).copied(), -180.0, 180.0);
+                self.status = Self::set_f32(
+                    &mut self.adj.color.split_highlight,
+                    t.get(1).copied(),
+                    -180.0,
+                    180.0,
+                );
                 self.dirty = true;
             }
             "skin" | "粉嫩" => {
@@ -1624,12 +1734,21 @@ impl RetouchApp {
             "autowb" => self.auto_wb(),
             "autodehaze" => self.auto_dehaze(),
             "film" | "胶片" => {
-                self.status = Self::set_f32(&mut self.adj.grade.film_curve, t.get(1).copied(), -0.25, 0.35);
+                self.status = Self::set_f32(
+                    &mut self.adj.grade.film_curve,
+                    t.get(1).copied(),
+                    -0.25,
+                    0.35,
+                );
                 self.dirty = true;
             }
             "lightratio" | "ratio" | "光比" => {
-                self.status =
-                    Self::set_f32(&mut self.adj.grade.light_ratio, t.get(1).copied(), -0.6, 0.6);
+                self.status = Self::set_f32(
+                    &mut self.adj.grade.light_ratio,
+                    t.get(1).copied(),
+                    -0.6,
+                    0.6,
+                );
                 self.dirty = true;
             }
             "zone" => {
@@ -1646,24 +1765,34 @@ impl RetouchApp {
                             Ok(v) => {
                                 self.adj.zones.lift[i] = v.clamp(-0.4, 0.4);
                                 self.dirty = true;
-                                self.status = format!("分区 {} → {:.2}", t[1], self.adj.zones.lift[i]);
+                                self.status =
+                                    format!("分区 {} → {:.2}", t[1], self.adj.zones.lift[i]);
                             }
                             Err(_) => self.status = "数值无效".into(),
                         },
-                        None => self.status = "未知分区 (shadows|dark_mid|light_mid|highlights)".into(),
+                        None => {
+                            self.status = "未知分区 (shadows|dark_mid|light_mid|highlights)".into()
+                        }
                     }
                 } else {
                     self.status = "用法: zone <分区> <值>".into();
                 }
             }
             "rotate" => {
-                self.status =
-                    Self::set_f32(&mut self.adj.geometry.rotate_deg, t.get(1).copied(), -180.0, 180.0);
+                self.status = Self::set_f32(
+                    &mut self.adj.geometry.rotate_deg,
+                    t.get(1).copied(),
+                    -180.0,
+                    180.0,
+                );
                 self.dirty = true;
             }
             "flip" => {
                 // flip v -> 垂直翻转；否则默认水平翻转（不再同时翻两轴）。
-                if t.get(1).map(|s| s.eq_ignore_ascii_case("v")).unwrap_or(false) {
+                if t.get(1)
+                    .map(|s| s.eq_ignore_ascii_case("v"))
+                    .unwrap_or(false)
+                {
                     self.adj.geometry.flip_v = !self.adj.geometry.flip_v;
                     self.status = "已垂直翻转".into();
                 } else {
@@ -1697,15 +1826,18 @@ impl RetouchApp {
                 }
             }
             "denoise" => {
-                self.status = Self::set_f32(&mut self.adj.detail.denoise, t.get(1).copied(), 0.0, 1.0);
+                self.status =
+                    Self::set_f32(&mut self.adj.detail.denoise, t.get(1).copied(), 0.0, 1.0);
                 self.dirty = true;
             }
             "sharpen" => {
-                self.status = Self::set_f32(&mut self.adj.detail.sharpen, t.get(1).copied(), 0.0, 1.0);
+                self.status =
+                    Self::set_f32(&mut self.adj.detail.sharpen, t.get(1).copied(), 0.0, 1.0);
                 self.dirty = true;
             }
             "diffuse" | "柔光" => {
-                self.status = Self::set_f32(&mut self.adj.detail.diffuse, t.get(1).copied(), 0.0, 1.0);
+                self.status =
+                    Self::set_f32(&mut self.adj.detail.diffuse, t.get(1).copied(), 0.0, 1.0);
                 self.dirty = true;
             }
             "freqsep" | "磨皮" => {
@@ -1757,9 +1889,11 @@ impl RetouchApp {
         let name = t[1];
         match HslRegions::band_index(name) {
             Some(i) => {
-                if let (Ok(h), Ok(s), Ok(l)) =
-                    (t[2].parse::<f32>(), t[3].parse::<f32>(), t[4].parse::<f32>())
-                {
+                if let (Ok(h), Ok(s), Ok(l)) = (
+                    t[2].parse::<f32>(),
+                    t[3].parse::<f32>(),
+                    t[4].parse::<f32>(),
+                ) {
                     self.adj.hsl.hue_shift[i] = h;
                     self.adj.hsl.sat_mult[i] = s.max(0.0);
                     self.adj.hsl.light_mult[i] = l.max(0.0);
@@ -1773,152 +1907,156 @@ impl RetouchApp {
         }
     }
 
-/// 带细线框的折叠分组，把左侧参数列表变成商业软件风格的设置面板。
-/// 每个分组一个浅色底 + 0.5px 边框的卡片，标题用 CollapsingHeader。
-/// Qwen(DashScope) Key 本地记忆：写入 `~/.retouch/qwen_key`，免每次输入。
-fn qwen_key_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let mut p = std::path::PathBuf::from(home);
-    p.push(".retouch");
-    p.push("qwen_key");
-    p
-}
-fn load_qwen_key() -> String {
-    std::fs::read_to_string(Self::qwen_key_path())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
-fn save_qwen_key(key: &str) {
-    if let Some(parent) = Self::qwen_key_path().parent() {
-        let _ = std::fs::create_dir_all(parent);
+    /// 带细线框的折叠分组，把左侧参数列表变成商业软件风格的设置面板。
+    /// 每个分组一个浅色底 + 0.5px 边框的卡片，标题用 CollapsingHeader。
+    /// Qwen(DashScope) Key 本地记忆：写入 `~/.retouch/qwen_key`，免每次输入。
+    fn qwen_key_path() -> std::path::PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let mut p = std::path::PathBuf::from(home);
+        p.push(".retouch");
+        p.push("qwen_key");
+        p
     }
-    let _ = std::fs::write(Self::qwen_key_path(), key.trim());
-}
-fn forget_qwen_key() {
-    let _ = std::fs::remove_file(Self::qwen_key_path());
-}
-
-/// 可记忆展开/折叠状态的分组卡片（默认折叠用）：点击标题切换 `open`。
-fn collapsing_section_state(
-    title: &str,
-    open: &mut bool,
-    ui: &mut egui::Ui,
-    content: impl FnOnce(&mut egui::Ui),
-) {
-    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
-    let available = ui.available_width();
-    ui.set_min_width(available);
-    ui.set_max_width(available);
-    egui::Frame::group(ui.style())
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(egui::Stroke::new(0.5, stroke.color))
-        .rounding(egui::Rounding::same(2.0))
-        .inner_margin(egui::Margin::same(6.0))
-        .outer_margin(egui::Margin::same(2.0))
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.set_max_width(ui.available_width());
-            let r = egui::CollapsingHeader::new(title).open(Some(*open)).show(ui, content);
-            if r.header_response.clicked() {
-                *open = !*open;
-            }
-        });
-}
-
-fn collapsing_section(
-    title: &str,
-    open: Option<bool>,
-    ui: &mut egui::Ui,
-    content: impl FnOnce(&mut egui::Ui),
-) {
-    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
-    let available = ui.available_width();
-    // 强制卡片占满侧栏可用宽度，避免各分组长短不一。
-    ui.set_min_width(available);
-    ui.set_max_width(available);
-    egui::Frame::group(ui.style())
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(egui::Stroke::new(0.5, stroke.color))
-        .rounding(egui::Rounding::same(2.0))
-        .inner_margin(egui::Margin::same(6.0))
-        .outer_margin(egui::Margin::same(2.0))
-        .show(ui, |ui| {
-            // 让 CollapsingHeader 在卡片内部也横向撑满，保持标题和展开内容对齐。
-            ui.set_min_width(ui.available_width());
-            ui.set_max_width(ui.available_width());
-            egui::CollapsingHeader::new(title).open(open).show(ui, content);
-        });
-}
-/// 顶部工具栏里一个常规按钮：文字在按钮背景中水平垂直居中。
-fn toolbar_btn(ui: &mut egui::Ui, label: &str, tooltip: &str) -> bool {
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).size(14.0))
-            .min_size(egui::vec2(0.0, 28.0))
-            .rounding(8.0),
-    )
-    .on_hover_text(tooltip)
-    .clicked()
-}
-
-/// 带细线框的工具栏分组：左侧弱化的分组名标签 + 按钮组，
-/// 所有文字使用同一套中文字体、无 emoji/图标，避免 fallback 字体造成高低错落。
-fn toolbar_group<F>(ui: &mut egui::Ui, label: &str, content: F)
-where
-    F: FnOnce(&mut egui::Ui),
-{
-    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
-    egui::Frame::group(ui.style())
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(egui::Stroke::new(0.5, stroke.color))
-        .rounding(egui::Rounding::same(2.0))
-        .inner_margin(egui::Margin {
-            left: 8.0,
-            right: 8.0,
-            top: 4.0,
-            bottom: 4.0,
-        })
-        .outer_margin(egui::Margin::same(2.0))
-        .show(ui, |ui| {
-            // 整行交叉轴居中，保证标签和按钮垂直中线对齐。
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                // 分组名：纯文字标签，固定与按钮一致的高度，文字在分配空间里居中。
-                ui.add_sized(
-                    egui::vec2(0.0, 28.0),
-                    egui::Label::new(
-                        egui::RichText::new(label)
-                            .size(12.0)
-                            .weak()
-                            .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
-                    )
-                    .selectable(false),
-                );
-                ui.add_space(6.0);
-                content(ui);
-            });
-        });
-}
-
-/// 按 ThemeMode 设置深色/浅色主题
-fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
-    let is_dark = match mode {
-        ThemeMode::Dark => true,
-        ThemeMode::Light => false,
-        ThemeMode::Auto => {
-            // UTC+8 时间段：19:00–06:00 深色，其余浅色
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let cst_hour = ((secs / 3600) % 24 + 8) % 24;
-            cst_hour >= 19 || cst_hour < 6
+    fn load_qwen_key() -> String {
+        std::fs::read_to_string(Self::qwen_key_path())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    }
+    fn save_qwen_key(key: &str) {
+        if let Some(parent) = Self::qwen_key_path().parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
-    };
-    if is_dark {
-        ctx.set_visuals(egui::style::Visuals::dark());
-    } else {
-        ctx.set_visuals(egui::style::Visuals::light());
+        let _ = std::fs::write(Self::qwen_key_path(), key.trim());
     }
-}
+    fn forget_qwen_key() {
+        let _ = std::fs::remove_file(Self::qwen_key_path());
+    }
+
+    /// 可记忆展开/折叠状态的分组卡片（默认折叠用）：点击标题切换 `open`。
+    fn collapsing_section_state(
+        title: &str,
+        open: &mut bool,
+        ui: &mut egui::Ui,
+        content: impl FnOnce(&mut egui::Ui),
+    ) {
+        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+        let available = ui.available_width();
+        ui.set_min_width(available);
+        ui.set_max_width(available);
+        egui::Frame::group(ui.style())
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(0.5, stroke.color))
+            .rounding(egui::Rounding::same(2.0))
+            .inner_margin(egui::Margin::same(6.0))
+            .outer_margin(egui::Margin::same(2.0))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.set_max_width(ui.available_width());
+                let r = egui::CollapsingHeader::new(title)
+                    .open(Some(*open))
+                    .show(ui, content);
+                if r.header_response.clicked() {
+                    *open = !*open;
+                }
+            });
+    }
+
+    fn collapsing_section(
+        title: &str,
+        open: Option<bool>,
+        ui: &mut egui::Ui,
+        content: impl FnOnce(&mut egui::Ui),
+    ) {
+        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+        let available = ui.available_width();
+        // 强制卡片占满侧栏可用宽度，避免各分组长短不一。
+        ui.set_min_width(available);
+        ui.set_max_width(available);
+        egui::Frame::group(ui.style())
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(0.5, stroke.color))
+            .rounding(egui::Rounding::same(2.0))
+            .inner_margin(egui::Margin::same(6.0))
+            .outer_margin(egui::Margin::same(2.0))
+            .show(ui, |ui| {
+                // 让 CollapsingHeader 在卡片内部也横向撑满，保持标题和展开内容对齐。
+                ui.set_min_width(ui.available_width());
+                ui.set_max_width(ui.available_width());
+                egui::CollapsingHeader::new(title)
+                    .open(open)
+                    .show(ui, content);
+            });
+    }
+    /// 顶部工具栏里一个常规按钮：文字在按钮背景中水平垂直居中。
+    fn toolbar_btn(ui: &mut egui::Ui, label: &str, tooltip: &str) -> bool {
+        ui.add(
+            egui::Button::new(egui::RichText::new(label).size(14.0))
+                .min_size(egui::vec2(0.0, 28.0))
+                .rounding(8.0),
+        )
+        .on_hover_text(tooltip)
+        .clicked()
+    }
+
+    /// 带细线框的工具栏分组：左侧弱化的分组名标签 + 按钮组，
+    /// 所有文字使用同一套中文字体、无 emoji/图标，避免 fallback 字体造成高低错落。
+    fn toolbar_group<F>(ui: &mut egui::Ui, label: &str, content: F)
+    where
+        F: FnOnce(&mut egui::Ui),
+    {
+        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+        egui::Frame::group(ui.style())
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(0.5, stroke.color))
+            .rounding(egui::Rounding::same(2.0))
+            .inner_margin(egui::Margin {
+                left: 8.0,
+                right: 8.0,
+                top: 4.0,
+                bottom: 4.0,
+            })
+            .outer_margin(egui::Margin::same(2.0))
+            .show(ui, |ui| {
+                // 整行交叉轴居中，保证标签和按钮垂直中线对齐。
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    // 分组名：纯文字标签，固定与按钮一致的高度，文字在分配空间里居中。
+                    ui.add_sized(
+                        egui::vec2(0.0, 28.0),
+                        egui::Label::new(
+                            egui::RichText::new(label)
+                                .size(12.0)
+                                .weak()
+                                .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
+                        )
+                        .selectable(false),
+                    );
+                    ui.add_space(6.0);
+                    content(ui);
+                });
+            });
+    }
+
+    /// 按 ThemeMode 设置深色/浅色主题
+    fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
+        let is_dark = match mode {
+            ThemeMode::Dark => true,
+            ThemeMode::Light => false,
+            ThemeMode::Auto => {
+                // UTC+8 时间段：19:00–06:00 深色，其余浅色
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let cst_hour = ((secs / 3600) % 24 + 8) % 24;
+                cst_hour >= 19 || cst_hour < 6
+            }
+        };
+        if is_dark {
+            ctx.set_visuals(egui::style::Visuals::dark());
+        } else {
+            ctx.set_visuals(egui::style::Visuals::light());
+        }
+    }
 
     fn side_panel(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
@@ -1950,9 +2088,7 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                 });
                 ui.horizontal(|ui| {
                     ui.label("笔刷");
-                    ui.add(
-                        egui::Slider::new(&mut self.spot_brush, 2..=50).suffix(" px"),
-                    );
+                    ui.add(egui::Slider::new(&mut self.spot_brush, 2..=50).suffix(" px"));
                 });
                 ui.horizontal(|ui| {
                     if ui.button("撤销一笔").clicked() {
@@ -1992,7 +2128,7 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                 if let Some(src) = &self.src {
                     let bal = auto_neutral_balance(src, self.smart_compensation);
                     self.status = bal.summary.clone();
-                    self.adj = bal.to_adjustments();
+                    self.replace_adj_preserve_geo(bal.to_adjustments());
                     // 存亮度基线供「还原亮度」滑块使用
                     self.auto_baseline = Some(self.adj.clone());
                     self.exposure_restore = 0.0;
@@ -2026,10 +2162,7 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
             ui.label("一键粉嫩肤色 + 温和频谱磨皮（纯算法，零 AI）。");
             ui.horizontal(|ui| {
                 ui.label("强度");
-                ui.add(
-                    egui::Slider::new(&mut self.beauty_strength, 0.0..=1.0)
-                        .suffix("%"),
-                );
+                ui.add(egui::Slider::new(&mut self.beauty_strength, 0.0..=1.0).suffix("%"));
             });
             if ui.button("一键美肤").clicked() {
                 self.apply_smart_beauty(self.beauty_strength);
@@ -2052,7 +2185,10 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                     "削波 高光 {:.2}%  暗部 {:.2}%",
                     m.exposure.highlight_clip_pct, m.exposure.shadow_clip_pct
                 ));
-                ui.label(format!("色域外 {:.2}%  色偏强度 {:.3}", m.gamut.clip_pct, m.cast.chroma));
+                ui.label(format!(
+                    "色域外 {:.2}%  色偏强度 {:.3}",
+                    m.gamut.clip_pct, m.cast.chroma
+                ));
                 if m.skin.ratio > 0.03 {
                     ui.label(format!(
                         "肤色 占比 {:.1}%  彩度 {:.3}  色相 {:.0}°",
@@ -2083,18 +2219,28 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
             if let Some(p) = &self.ref_path {
                 ui.label(format!(
                     "{}",
-                    p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+                    p.file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default()
                 ));
             }
             ui.horizontal(|ui| {
-                if ui.button("导入参考图").on_hover_text("选一张你喜欢的图作为影调目标").clicked() {
+                if ui
+                    .button("导入参考图")
+                    .on_hover_text("选一张你喜欢的图作为影调目标")
+                    .clicked()
+                {
                     self.import_reference(&ctx2);
                 }
                 if ui.button("清除").on_hover_text("移除参考图").clicked() {
                     self.clear_reference();
                 }
                 ui.add_enabled_ui(self.ref_metrics.is_some() && self.src.is_some(), |ui| {
-                    if ui.button("匹配影调").on_hover_text("把当前图影调朝参考图靠拢").clicked() {
+                    if ui
+                        .button("匹配影调")
+                        .on_hover_text("把当前图影调朝参考图靠拢")
+                        .clicked()
+                    {
                         self.start_reference_match();
                     }
                 });
@@ -2123,12 +2269,16 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                             // 再叠加本预设的风格增量——自适应原图而非死数值。
                             if let Some(ref src) = self.src {
                                 let engine = tonal_adjustments(src, self.smart_compensation, 1.0);
-                                self.adj = Self::blend_adj(&engine, &preset.adj, 0.7);
+                                self.replace_adj_preserve_geo(Self::blend_adj(
+                                    &engine,
+                                    &preset.adj,
+                                    0.7,
+                                ));
                             } else {
-                                self.adj = preset.adj;
+                                self.replace_adj_preserve_geo(preset.adj);
                             }
                         } else {
-                            self.adj = preset.adj;
+                            self.replace_adj_preserve_geo(preset.adj);
                         }
                         self.auto_baseline = Some(self.adj.clone());
                         self.status = format!("已应用预设：{}", preset.name);
@@ -2193,8 +2343,12 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                         .text("亮度联动衰减"),
                 )
                 .changed();
-            changed |= ui.checkbox(&mut self.adj.defake.fix_sky, "天空修正").changed();
-            changed |= ui.checkbox(&mut self.adj.defake.protect_skin, "肤色保护").changed();
+            changed |= ui
+                .checkbox(&mut self.adj.defake.fix_sky, "天空修正")
+                .changed();
+            changed |= ui
+                .checkbox(&mut self.adj.defake.protect_skin, "肤色保护")
+                .changed();
         });
 
         // 胶片感 / 光比（核心智能控制：全部走人眼感知曲线，非纯线性）
@@ -2240,7 +2394,9 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
 
         // 粉嫩肤色：high-level 意图滑块，后台自动解析成 OKLCH 目标。
         Self::collapsing_section("粉嫩肤色", force_open, ui, |ui| {
-            changed |= ui.checkbox(&mut self.adj.skin.enabled, "启用肤色优化").changed();
+            changed |= ui
+                .checkbox(&mut self.adj.skin.enabled, "启用肤色优化")
+                .changed();
             let mut skin_touched = false;
             skin_touched |= self.param_slider(ui, Field::SkinStrength);
             skin_touched |= self.param_slider(ui, Field::SkinYellowReduce);
@@ -2282,8 +2438,7 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                     .clicked()
                 {
                     // 逆时针 = 3 个顺时针 quarter-turn
-                    self.adj.geometry.quarter_turns =
-                        (self.adj.geometry.quarter_turns + 3) % 4;
+                    self.adj.geometry.quarter_turns = (self.adj.geometry.quarter_turns + 3) % 4;
                     self.dirty_geo = true;
                 }
                 if ui
@@ -2291,13 +2446,16 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                     .on_hover_text("顺时针旋转 90°（无损，可与下方微调独立叠加）")
                     .clicked()
                 {
-                    self.adj.geometry.quarter_turns =
-                        (self.adj.geometry.quarter_turns + 1) % 4;
+                    self.adj.geometry.quarter_turns = (self.adj.geometry.quarter_turns + 1) % 4;
                     self.dirty_geo = true;
                 }
                 let fh = self.adj.geometry.flip_h;
                 if ui
-                    .button(if fh { "水平翻转 ✓" } else { "水平翻转" })
+                    .button(if fh {
+                        "水平翻转 ✓"
+                    } else {
+                        "水平翻转"
+                    })
                     .on_hover_text("镜像左右（可叠加旋转；再次点击还原）")
                     .clicked()
                 {
@@ -2306,7 +2464,11 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                 }
                 let fv = self.adj.geometry.flip_v;
                 if ui
-                    .button(if fv { "垂直翻转 ✓" } else { "垂直翻转" })
+                    .button(if fv {
+                        "垂直翻转 ✓"
+                    } else {
+                        "垂直翻转"
+                    })
                     .on_hover_text("镜像上下（可叠加旋转；再次点击还原）")
                     .clicked()
                 {
@@ -2351,8 +2513,7 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                 top *= k;
                 bottom *= k;
             }
-            let crop_none =
-                left < 1e-3 && right < 1e-3 && top < 1e-3 && bottom < 1e-3;
+            let crop_none = left < 1e-3 && right < 1e-3 && top < 1e-3 && bottom < 1e-3;
             self.adj.geometry.crop = if crop_none {
                 None
             } else {
@@ -2376,7 +2537,11 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                         ("4:3", 4.0 / 3.0),
                         ("16:9", 16.0 / 9.0),
                     ] {
-                        if ui.small_button(name).on_hover_text("按此比例居中裁切").clicked() {
+                        if ui
+                            .small_button(name)
+                            .on_hover_text("按此比例居中裁切")
+                            .clicked()
+                        {
                             let target = ar / img_ar; // 相对画面的宽高比
                             if target >= 1.0 {
                                 let tb = (1.0 - 1.0 / target) / 2.0;
@@ -2392,7 +2557,11 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                     }
                 });
             }
-            if ui.button("重置裁剪").on_hover_text("恢复完整画面").clicked() {
+            if ui
+                .button("重置裁剪")
+                .on_hover_text("恢复完整画面")
+                .clicked()
+            {
                 self.adj.geometry.crop = None;
                 g_changed = true;
             }
@@ -2461,70 +2630,85 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
         // 默认折叠：Key 已本地记住，无需每次展开；点标题可展开编辑/清除。
         // 用局部变量承接展开状态，避免 &mut self.qwen_open 与闭包内 &mut self 冲突。
         let mut qopen = self.qwen_open;
-        Self::collapsing_section_state("作品名设置（可选 · 已记忆 Key）", &mut qopen, ui, |ui| {
-            ui.label(egui::RichText::new("仅「生成作品名」用 Qwen 视觉；不填则不联网、零 token。Key 已本地记住。").size(11.0).weak());
-            let mut key = self.api_qwen_key.clone();
-            ui.horizontal(|ui| {
-                ui.label("Qwen Key");
-                let r = ui.add(
-                    egui::TextEdit::singleline(&mut key)
-                        .password(true)
-                        .hint_text("粘贴 DashScope / Qwen Key"),
+        Self::collapsing_section_state(
+            "作品名设置（可选 · 已记忆 Key）",
+            &mut qopen,
+            ui,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "仅「生成作品名」用 Qwen 视觉；不填则不联网、零 token。Key 已本地记住。",
+                    )
+                    .size(11.0)
+                    .weak(),
                 );
-                if r.changed() {
-                    self.api_qwen_key = key.trim().to_string();
-                    Self::save_qwen_key(&self.api_qwen_key);
-                    changed = true;
+                let mut key = self.api_qwen_key.clone();
+                ui.horizontal(|ui| {
+                    ui.label("Qwen Key");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut key)
+                            .password(true)
+                            .hint_text("粘贴 DashScope / Qwen Key"),
+                    );
+                    if r.changed() {
+                        self.api_qwen_key = key.trim().to_string();
+                        Self::save_qwen_key(&self.api_qwen_key);
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("生成作品名")
+                        .on_hover_text("用 Qwen 视觉为当前图起名 + 点评（需 Key）")
+                        .clicked()
+                    {
+                        self.generate_title();
+                    }
+                    if ui
+                        .button("清除 Key")
+                        .on_hover_text("删除本地记住的 Key（下次需重填）")
+                        .clicked()
+                    {
+                        self.api_qwen_key.clear();
+                        Self::forget_qwen_key();
+                        changed = true;
+                    }
+                });
+                if let Some(t) = &self.last_title {
+                    ui.separator();
+                    // 标题：大号粗体
+                    let title = if let Some(s) = t.find('》') {
+                        &t[..s + 3] // "《春日》" 部分
+                    } else {
+                        &t[..]
+                    };
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(title).size(15.0).strong(),
+                    ));
+                    // 点评内容：如有则在可滚动区域显示
+                    let review = if let Some(s) = t.find('—') {
+                        &t[s + 2..]
+                    } else if let Some(s) = t.find('》') {
+                        &t[s + 3..]
+                    } else {
+                        ""
+                    };
+                    if !review.trim().is_empty() {
+                        ui.add_space(2.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("review_scroll")
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                ui.add(egui::Label::new(
+                                    egui::RichText::new(review.trim())
+                                        .size(13.0)
+                                        .color(egui::Color32::from_gray(180)),
+                                ));
+                            });
+                    }
                 }
-            });
-            ui.horizontal(|ui| {
-                if ui
-                    .button("生成作品名")
-                    .on_hover_text("用 Qwen 视觉为当前图起名 + 点评（需 Key）")
-                    .clicked()
-                {
-                    self.generate_title();
-                }
-                if ui.button("清除 Key").on_hover_text("删除本地记住的 Key（下次需重填）").clicked() {
-                    self.api_qwen_key.clear();
-                    Self::forget_qwen_key();
-                    changed = true;
-                }
-            });
-            if let Some(t) = &self.last_title {
-                ui.separator();
-                // 标题：大号粗体
-                let title = if let Some(s) = t.find('》') {
-                    &t[..s + 3] // "《春日》" 部分
-                } else {
-                    &t[..]
-                };
-                ui.add(egui::Label::new(
-                    egui::RichText::new(title).size(15.0).strong(),
-                ));
-                // 点评内容：如有则在可滚动区域显示
-                let review = if let Some(s) = t.find('—') {
-                    &t[s + 2..]
-                } else if let Some(s) = t.find('》') {
-                    &t[s + 3..]
-                } else {
-                    ""
-                };
-                if !review.trim().is_empty() {
-                    ui.add_space(2.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("review_scroll")
-                        .max_height(120.0)
-                        .show(ui, |ui| {
-                            ui.add(egui::Label::new(
-                                egui::RichText::new(review.trim())
-                                    .size(13.0)
-                                    .color(egui::Color32::from_gray(180)),
-                            ));
-                        });
-                }
-            }
-        });
+            },
+        );
         self.qwen_open = qopen;
 
         // 一键智能：纯算法闭环，后台线程跑，不卡 UI。
@@ -2532,9 +2716,17 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
             ui.label(egui::RichText::new("一键中性：纯算法、零 key，把图修到健康中性影调（不过曝）。选力度后点「应用」：").size(11.0).weak());
             ui.horizontal_wrapped(|ui| {
                 for (label, val, tip) in [
-                    ("弱", 0.5f32, "轻度：保留中性化的颜色好处，只做克制的反差/鲜艳微调"),
+                    (
+                        "弱",
+                        0.5f32,
+                        "轻度：保留中性化的颜色好处，只做克制的反差/鲜艳微调",
+                    ),
                     ("中", 1.0f32, "标准：明显修过且不毁图，适合大多数照片"),
-                    ("强", 1.8f32, "增强：按影调类型针对性加强反差/暗部/鲜艳，仍保护高光与纯黑"),
+                    (
+                        "强",
+                        1.8f32,
+                        "增强：按影调类型针对性加强反差/暗部/鲜艳，仍保护高光与纯黑",
+                    ),
                 ] {
                     let selected = (self.neutral_strength - val).abs() < 1e-3;
                     if ui
@@ -2561,16 +2753,27 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
         ui.separator();
         egui::Frame::group(ui.style())
             .fill(ui.visuals().faint_bg_color)
-            .stroke(egui::Stroke::new(0.5, ui.visuals().widgets.noninteractive.bg_stroke.color))
+            .stroke(egui::Stroke::new(
+                0.5,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            ))
             .rounding(egui::Rounding::same(6.0))
             .inner_margin(egui::Margin::same(6.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("重置（归零）").on_hover_text("所有参数归零（纯原图，无任何调整）").clicked() {
+                    if ui
+                        .button("重置（归零）")
+                        .on_hover_text("所有参数归零（纯原图，无任何调整）")
+                        .clicked()
+                    {
                         self.adj = Adjustments::default();
                         changed = true;
                     }
-                    if ui.button("照片默认").on_hover_text("推荐初始参数（适合大多数照片的起点）").clicked() {
+                    if ui
+                        .button("照片默认")
+                        .on_hover_text("推荐初始参数（适合大多数照片的起点）")
+                        .clicked()
+                    {
                         self.adj = Adjustments::photo_default();
                         changed = true;
                     }
@@ -2618,10 +2821,8 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                     && pos.y >= image_rect.min.y
                     && pos.y <= image_rect.max.y;
                 if inside {
-                    let cx =
-                        ((pos.x - image_rect.min.x) / image_rect.width()).clamp(0.0, 1.0);
-                    let cy =
-                        ((pos.y - image_rect.min.y) / image_rect.height()).clamp(0.0, 1.0);
+                    let cx = ((pos.x - image_rect.min.x) / image_rect.width()).clamp(0.0, 1.0);
+                    let cy = ((pos.y - image_rect.min.y) / image_rect.height()).clamp(0.0, 1.0);
                     let r_norm = self.spot_brush as f32 / 1000.0;
                     let dragging = resp.dragged();
                     let clicked = resp.clicked();
@@ -2652,8 +2853,7 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                         }
                     }
                     spot_cursor = Some(pos);
-                    spot_brush_px = (r_norm * image_rect.width().min(image_rect.height()))
-                        .max(2.0);
+                    spot_brush_px = (r_norm * image_rect.width().min(image_rect.height())).max(2.0);
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
                 }
             }
@@ -2665,26 +2865,29 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
         }
 
         // Decide which texture to draw.
-        let show_before = show_before_key
-            || (self.compare_mode == CompareMode::Toggle && before.is_some());
+        let show_before =
+            show_before_key || (self.compare_mode == CompareMode::Toggle && before.is_some());
 
         if self.compare_mode == CompareMode::Split {
             if let Some(before) = before {
-                let split_x = panel_rect.left() + panel_rect.width() * self.split_pos.clamp(0.1, 0.9);
-                let left_rect = egui::Rect::from_min_max(
-                    panel_rect.min,
-                    egui::pos2(split_x, panel_rect.max.y),
+                let split_x =
+                    panel_rect.left() + panel_rect.width() * self.split_pos.clamp(0.1, 0.9);
+                let left_rect =
+                    egui::Rect::from_min_max(panel_rect.min, egui::pos2(split_x, panel_rect.max.y));
+                let right_rect =
+                    egui::Rect::from_min_max(egui::pos2(split_x, panel_rect.min.y), panel_rect.max);
+                ui.painter().with_clip_rect(left_rect).image(
+                    before.id(),
+                    image_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
                 );
-                let right_rect = egui::Rect::from_min_max(
-                    egui::pos2(split_x, panel_rect.min.y),
-                    panel_rect.max,
+                ui.painter().with_clip_rect(right_rect).image(
+                    after.id(),
+                    image_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
                 );
-                ui.painter()
-                    .with_clip_rect(left_rect)
-                    .image(before.id(), image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
-                ui.painter()
-                    .with_clip_rect(right_rect)
-                    .image(after.id(), image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
                 // Draggable divider with a generous hit area and resize cursor.
                 let div_handle_w = 8.0f32;
                 let divider = egui::Rect::from_center_size(
@@ -2693,15 +2896,16 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                 );
                 let div_resp = ui.interact(divider, ui.id().with("split"), egui::Sense::drag());
                 if div_resp.dragged() {
-                    self.split_pos =
-                        ((div_resp.interact_pointer_pos().unwrap_or(center).x - panel_rect.left())
-                            / panel_rect.width())
-                            .clamp(0.05, 0.95);
+                    self.split_pos = ((div_resp.interact_pointer_pos().unwrap_or(center).x
+                        - panel_rect.left())
+                        / panel_rect.width())
+                    .clamp(0.05, 0.95);
                 }
                 if div_resp.hovered() || div_resp.dragged() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 }
-                ui.painter().rect_filled(divider, 0.0, egui::Color32::from_gray(180));
+                ui.painter()
+                    .rect_filled(divider, 0.0, egui::Color32::from_gray(180));
             } else {
                 ui.painter().image(
                     after.id(),
@@ -2845,11 +3049,12 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                         return;
                     }
                     let br2 = bout.into_raw();
-                    let before_img =
-                        egui::ColorImage::from_rgb([ow2 as usize, oh2 as usize], &br2);
-                    self.before_texture = Some(
-                        ctx.load_texture("before", before_img, egui::TextureOptions::default()),
-                    );
+                    let before_img = egui::ColorImage::from_rgb([ow2 as usize, oh2 as usize], &br2);
+                    self.before_texture = Some(ctx.load_texture(
+                        "before",
+                        before_img,
+                        egui::TextureOptions::default(),
+                    ));
                 }
             }
         }
@@ -2961,10 +3166,7 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                                 } else {
                                     (60.0f32 * ar, 60.0f32)
                                 };
-                                let st = egui::load::SizedTexture::new(
-                                    t.id(),
-                                    egui::vec2(tw, th),
-                                );
+                                let st = egui::load::SizedTexture::new(t.id(), egui::vec2(tw, th));
                                 ui.add(egui::Image::new(st));
                             }
                         });
@@ -2999,7 +3201,6 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
     }
 }
 
-
 impl eframe::App for RetouchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 兜底：任何一帧里的 panic（尤其是几何旋转导致尺寸互换等路径）都绝不应
@@ -3026,21 +3227,25 @@ impl RetouchApp {
         // 滑竿宽度每根单独设（available_width * 0.67 缩短 1/3）。
         ctx.all_styles_mut(|style| {
             use egui::{FontFamily, FontId, TextStyle};
-            style
-                .text_styles
-                .insert(TextStyle::Small, FontId::new(16.0, FontFamily::Proportional));
+            style.text_styles.insert(
+                TextStyle::Small,
+                FontId::new(16.0, FontFamily::Proportional),
+            );
             style
                 .text_styles
                 .insert(TextStyle::Body, FontId::new(25.0, FontFamily::Proportional));
-            style
-                .text_styles
-                .insert(TextStyle::Button, FontId::new(22.0, FontFamily::Proportional));
-            style
-                .text_styles
-                .insert(TextStyle::Heading, FontId::new(32.0, FontFamily::Proportional));
-            style
-                .text_styles
-                .insert(TextStyle::Monospace, FontId::new(22.0, FontFamily::Monospace));
+            style.text_styles.insert(
+                TextStyle::Button,
+                FontId::new(22.0, FontFamily::Proportional),
+            );
+            style.text_styles.insert(
+                TextStyle::Heading,
+                FontId::new(32.0, FontFamily::Proportional),
+            );
+            style.text_styles.insert(
+                TextStyle::Monospace,
+                FontId::new(22.0, FontFamily::Monospace),
+            );
             style.spacing.slider_rail_height = 9.0;
             style.spacing.item_spacing = egui::vec2(8.0, 4.0);
             style.spacing.button_padding = egui::vec2(12.0, 6.0);
@@ -3089,13 +3294,13 @@ impl RetouchApp {
                         .unwrap_or("")
                         .to_lowercase();
                     if ["jpg", "jpeg", "png", "tif", "tiff"].contains(&ext.as_str()) {
-                            // Remember directory from drop too.
-                            if let Some(parent) = path.parent() {
-                                self.last_open_dir = Some(parent.to_path_buf());
-                            }
-                            self.load_image(path);
-                            break; // Only take first valid image
+                        // Remember directory from drop too.
+                        if let Some(parent) = path.parent() {
+                            self.last_open_dir = Some(parent.to_path_buf());
                         }
+                        self.load_image(path);
+                        break; // Only take first valid image
+                    }
                 }
             }
         }
@@ -3131,7 +3336,7 @@ impl RetouchApp {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(8.0); // 右侧留白，不贴边
-                    // 换一句按钮
+                                       // 换一句按钮
                     if Self::toolbar_btn(ui, "换一句", "换一条修图小技巧") {
                         self.current_tip = tips::next_tip(self.current_tip);
                     }
@@ -3171,19 +3376,17 @@ impl RetouchApp {
                 let busy = self.is_busy();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(16.0); // 右留白
-                    // 忙碌时显示旋转指示器，让用户明确知道后台正在处理。
+                                        // 忙碌时显示旋转指示器，让用户明确知道后台正在处理。
                     if busy {
                         ui.add(egui::Spinner::new().size(14.0));
                         ui.add_space(6.0);
                     }
                     // 隐去滚动条，文本裁剪自然溢出
-                    let resp = ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(status_text)
-                                .size(13.0)
-                                .color(egui::Color32::from_gray(160)),
-                        ),
-                    );
+                    let resp = ui.add(egui::Label::new(
+                        egui::RichText::new(status_text)
+                            .size(13.0)
+                            .color(egui::Color32::from_gray(160)),
+                    ));
                     resp.on_hover_ui(|ui| {
                         ui.label(egui::RichText::new(&self.status).size(12.0));
                     });
@@ -3207,22 +3410,26 @@ impl RetouchApp {
                     if Self::toolbar_btn(ui, "载入预设", "加载 TOML 预设参数 (Cmd+P)") {
                         self.load_preset_file();
                     }
-                    if Self::toolbar_btn(ui, "存预设", "把当前所有参数保存为 TOML 预设") {
+                    if Self::toolbar_btn(ui, "存预设", "把当前所有参数保存为 TOML 预设")
+                    {
                         self.save_preset_file();
                     }
                     if Self::toolbar_btn(ui, "保存图", "导出/保存图片 (Cmd+S)") {
                         self.save();
                     }
-                    if Self::toolbar_btn(ui, "作品名", "Qwen 视觉生成作品名（默认不联网）") {
+                    if Self::toolbar_btn(ui, "作品名", "Qwen 视觉生成作品名（默认不联网）")
+                    {
                         self.generate_title();
                     }
                 });
 
                 Self::toolbar_group(ui, "校正", |ui| {
-                    if Self::toolbar_btn(ui, "一键中性", "本地零 key 中性校正（闭环，不过曝）") {
+                    if Self::toolbar_btn(ui, "一键中性", "本地零 key 中性校正（闭环，不过曝）")
+                    {
                         self.start_local_auto();
                     }
-                    if Self::toolbar_btn(ui, "参考匹配", "导入喜欢的图，一键克隆它的影调") {
+                    if Self::toolbar_btn(ui, "参考匹配", "导入喜欢的图，一键克隆它的影调")
+                    {
                         if self.ref_metrics.is_none() {
                             self.import_reference(ctx);
                         } else {
@@ -3241,8 +3448,13 @@ impl RetouchApp {
                     if Self::toolbar_btn(ui, "全收起", "收起所有参数分组") {
                         self.force_open = Some(false);
                     }
-                    let album_label = if self.show_album { "●相册" } else { "相册" };
-                    if Self::toolbar_btn(ui, album_label, "显示/隐藏右侧相册栏（窄窗自动折叠）") {
+                    let album_label = if self.show_album {
+                        "●相册"
+                    } else {
+                        "相册"
+                    };
+                    if Self::toolbar_btn(ui, album_label, "显示/隐藏右侧相册栏（窄窗自动折叠）")
+                    {
                         self.show_album = !self.show_album;
                     }
                 });
@@ -3351,9 +3563,7 @@ impl RetouchApp {
             egui::Window::new("命令盘 (Cmd+K)")
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    let enter = ui
-                        .text_edit_singleline(&mut self.cmd)
-                        .lost_focus()
+                    let enter = ui.text_edit_singleline(&mut self.cmd).lost_focus()
                         && ctx.input(|i| i.key_pressed(egui::Key::Enter));
                     if ui.button("执行").clicked() || enter {
                         let cmd = self.cmd.clone();
@@ -3406,7 +3616,10 @@ impl RetouchApp {
                 if result.after_rgb.len() != need {
                     eprintln!(
                         "[retouch-rs] 预览结果尺寸不符（{}×{}×3={} != {}），丢弃本帧",
-                        aw, ah, need, result.after_rgb.len()
+                        aw,
+                        ah,
+                        need,
+                        result.after_rgb.len()
                     );
                 } else {
                     // 基图入库：颜色管线只产出「正立」结果，几何稍后单独施加。
@@ -3582,14 +3795,20 @@ fn setup_cjk_fonts(ctx: &egui::Context) {
         match std::fs::read(path) {
             Ok(bytes) => {
                 let mut fonts = egui::FontDefinitions::default();
-                fonts.font_data.insert(
-                    "cjk_fallback".to_owned(),
-                    egui::FontData::from_owned(bytes),
-                );
+                fonts
+                    .font_data
+                    .insert("cjk_fallback".to_owned(), egui::FontData::from_owned(bytes));
                 // CJK 排最前（不改基线），不清除默认字体（保留 emoji/拉丁 fallback）。
-                let prop = fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap();
+                let prop = fonts
+                    .families
+                    .get_mut(&egui::FontFamily::Proportional)
+                    .unwrap();
                 prop.insert(0, "cjk_fallback".to_owned());
-                fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap().insert(0, "cjk_fallback".to_owned());
+                fonts
+                    .families
+                    .get_mut(&egui::FontFamily::Monospace)
+                    .unwrap()
+                    .insert(0, "cjk_fallback".to_owned());
                 ctx.set_fonts(fonts);
                 // UI 样式统一基础：按钮内边距、图标宽度、控件间距
                 // 注意：字体尺寸由 update_inner 每帧统一设置，不在此设避免冲突。
@@ -3732,21 +3951,21 @@ fn field_gradient(f: &Field, raw: f32) -> Option<Vec<[f32; 3]>> {
             // right. The white tick marks the current value; neutral (raw=0)
             // sits exactly at the 50 % boundary, so both colours occupy equal
             // visual width across the full slider range.
-            let blue   = [0.22, 0.42, 1.0];   // FilmRust-style cool
-            let orange = [1.0, 0.58, 0.15];   // FilmRust-style warm
+            let blue = [0.22, 0.42, 1.0]; // FilmRust-style cool
+            let orange = [1.0, 0.58, 0.15]; // FilmRust-style warm
             Some(lerp_gradient(&[blue, orange], 120))
         }
         Field::WBTint => {
             // 50/50 two-colour split: pure green on the left, pure magenta on
             // the right. Neutral (raw=0) is the 50 % mix point.
-            let green   = [0.30, 0.95, 0.40];
+            let green = [0.30, 0.95, 0.40];
             let magenta = [0.95, 0.30, 0.90];
             Some(lerp_gradient(&[green, magenta], 120))
         }
         Field::Saturation => {
             // Fixed: desaturated (gray) left → neutral centre → oversaturated (red) right.
             let gray = [0.55, 0.55, 0.55];
-            let red  = [1.0, 0.28, 0.28];
+            let red = [1.0, 0.28, 0.28];
             Some(lerp_gradient(&[gray, NEUTRAL, red], 120))
         }
         Field::Vibrance => {
@@ -3959,5 +4178,44 @@ mod font_tests {
             assert_ne!(gid, GlyphId(0), "字符 {ch} 不应映射到 .notdef");
         }
         assert!(face.tables().fvar.is_some(), "应为含字重轴的变量字体");
+    }
+}
+
+/// 几何保护不变式（纯函数）：`new` 的所有字段生效，但几何沿用 `current` 的。
+/// 抽成自由函数便于单测直接验证，且 `replace_adj_preserve_geo` 调用它。
+fn preserve_geometry(current: &Adjustments, new: Adjustments) -> Adjustments {
+    let mut n = new;
+    n.geometry = current.geometry.clone();
+    n
+}
+
+#[cfg(test)]
+mod geo_preserve_tests {
+    use super::preserve_geometry;
+    use retouch_core::pipeline::Adjustments;
+
+    /// 用户先旋转+裁剪+翻转，再走 `to_adjustments()` 产出的"几何清零"新参数，
+    /// 几何必须被死保、颜色参数正常保留。回归：防"调别的参数旋转又回来"。
+    #[test]
+    fn keeps_rotation_crop_flip_through_auto_preset() {
+        let mut current = Adjustments::default();
+        current.geometry.quarter_turns = 1;
+        current.geometry.crop = Some((0.1, 0.1, 0.9, 0.9));
+        current.geometry.flip_h = true;
+
+        let new = {
+            let mut a = Adjustments::default();
+            a.exposure_ev = 0.3; // 自动调了曝光，几何被清零
+            a
+        };
+        let out = preserve_geometry(&current, new);
+        assert_eq!(out.geometry.quarter_turns, 1, "旋转应被死保");
+        assert_eq!(
+            out.geometry.crop,
+            Some((0.1, 0.1, 0.9, 0.9)),
+            "裁剪应被死保"
+        );
+        assert!(out.geometry.flip_h, "翻转应被死保");
+        assert_eq!(out.exposure_ev, 0.3, "颜色参数应保留");
     }
 }

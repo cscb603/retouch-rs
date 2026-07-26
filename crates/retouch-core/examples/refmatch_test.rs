@@ -59,10 +59,15 @@ fn main() {
     );
     println!("\n-- 判定 --");
     let after = &result.metrics_after;
-    let over_exposed = after.tone.mean_l > 0.62 || after.exposure.highlight_clip_pct > result.metrics_before.exposure.highlight_clip_pct + 0.5;
+    let over_exposed = after.tone.mean_l > 0.62
+        || after.exposure.highlight_clip_pct
+            > result.metrics_before.exposure.highlight_clip_pct + 0.5;
     let skin_blown = after.skin.mean_l > 0.82;
     println!("护栏通过: {}", result.guardrail_passed);
-    println!("过曝/油光: {}", if over_exposed { "❌ FAIL" } else { "✅ OK" });
+    println!(
+        "过曝/油光: {}",
+        if over_exposed { "❌ FAIL" } else { "✅ OK" }
+    );
     println!("肤色过亮: {}", if skin_blown { "❌ FAIL" } else { "✅ OK" });
     println!("\n-- 迭代日志 --");
     for l in &result.log {

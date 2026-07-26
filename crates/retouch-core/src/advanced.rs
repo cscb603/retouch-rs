@@ -5,9 +5,9 @@
 //! is a strict identity when disabled / strength = 0, so the M0 round-trip is
 //! preserved for the rest of the pipeline.
 
+use crate::spatial::{blend2, gaussian_blur, smoothstep};
 use image::RgbImage;
 use rayon::prelude::*;
-use crate::spatial::{blend2, gaussian_blur, smoothstep};
 
 /// 频谱磨皮 (frequency-separation skin smoothing). Separates the image into a
 /// smoothed low-frequency layer (large-scale skin tone) and a high-frequency
@@ -62,7 +62,11 @@ pub struct PyramidFusion {
 
 impl Default for PyramidFusion {
     fn default() -> Self {
-        Self { enabled: false, strength: 0.5, detail_scale: 1.0 }
+        Self {
+            enabled: false,
+            strength: 0.5,
+            detail_scale: 1.0,
+        }
     }
 }
 
@@ -203,7 +207,10 @@ mod tests {
         fs.enabled = true;
         fs.strength = 0.8;
         fs.texture_keep = 0.5;
-        let a = Advanced { freqsep: fs, pyramid: PyramidFusion::default() };
+        let a = Advanced {
+            freqsep: fs,
+            pyramid: PyramidFusion::default(),
+        };
         let out = apply_advanced(img.clone(), &a);
         // The blemish should be pulled toward the surrounding skin tone.
         let b_in = img.get_pixel(20, 20).0;
@@ -235,7 +242,10 @@ mod tests {
         let mut pf = PyramidFusion::default();
         pf.enabled = true;
         pf.strength = 0.0;
-        let a = Advanced { freqsep: FreqSepSkin::default(), pyramid: pf };
+        let a = Advanced {
+            freqsep: FreqSepSkin::default(),
+            pyramid: pf,
+        };
         let out = apply_advanced(img.clone(), &a);
         for (p, q) in img.pixels().zip(out.pixels()) {
             assert_eq!(p.0, q.0, "pyramid strength=0 must be identity");
@@ -252,7 +262,10 @@ mod tests {
         let mut pf = PyramidFusion::default();
         pf.enabled = true;
         pf.strength = 0.5;
-        let a = Advanced { freqsep: FreqSepSkin::default(), pyramid: pf };
+        let a = Advanced {
+            freqsep: FreqSepSkin::default(),
+            pyramid: pf,
+        };
         let out = apply_advanced(img.clone(), &a);
         let mut changed = false;
         for (p, q) in img.pixels().zip(out.pixels()) {

@@ -6,10 +6,10 @@
 //! identity when its control is at neutral, so the M0 pixel-exact round-trip
 //! is preserved.
 
-use image::RgbImage;
-use rayon::prelude::*;
 use crate::sharpen;
 use crate::spatial::{gaussian_blur, luma, smoothstep};
+use image::RgbImage;
+use rayon::prelude::*;
 
 /// Detail finishing controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,7 +29,11 @@ pub struct Detail {
 
 impl Default for Detail {
     fn default() -> Self {
-        Self { denoise: 0.0, sharpen: 0.0, diffuse: 0.0 }
+        Self {
+            denoise: 0.0,
+            sharpen: 0.0,
+            diffuse: 0.0,
+        }
     }
 }
 
@@ -166,7 +170,11 @@ mod tests {
             // mid-gray base + noise so denoise has something to clean
             let base = 120u8;
             let n = if v > 200 { 30 } else { 0 };
-            *px = Rgb([base.saturating_add(n), base.saturating_add(n), base.saturating_add(n)]);
+            *px = Rgb([
+                base.saturating_add(n),
+                base.saturating_add(n),
+                base.saturating_add(n),
+            ]);
         }
         img
     }

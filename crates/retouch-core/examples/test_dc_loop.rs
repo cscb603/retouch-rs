@@ -170,8 +170,13 @@ fn run_one(path: &str) {
     let m_orig = analyze(&orig);
     println!(
         "  原图   meanL={:.3} stdL={:.3} cast={:.3}@{:.0}° huePeak={:.3} skinL={:.3} skinC={:.3}",
-        m_orig.tone.mean_l, m_orig.tone.std_l, m_orig.cast.chroma, m_orig.cast.hue_deg,
-        m_orig.color.hue_peakiness, m_orig.skin.mean_l, m_orig.skin.mean_c
+        m_orig.tone.mean_l,
+        m_orig.tone.std_l,
+        m_orig.cast.chroma,
+        m_orig.cast.hue_deg,
+        m_orig.color.hue_peakiness,
+        m_orig.skin.mean_l,
+        m_orig.skin.mean_c
     );
     let (na0, nb0, _, _) = neutral_cast(&orig_rgb);
     println!("  原图近中性偏色 (a,b)=({:.2},{:.2})", na0, nb0);
@@ -210,7 +215,11 @@ fn run_one(path: &str) {
         for step in 1..=20 {
             s = (1.0 - step as f32 * 0.05).max(0.0);
             final_img = blend(&orig_rgb, &sec, s);
-            if analyze(&DynamicImage::ImageRgb8(final_img.clone())).tone.mean_l <= cap {
+            if analyze(&DynamicImage::ImageRgb8(final_img.clone()))
+                .tone
+                .mean_l
+                <= cap
+            {
                 break;
             }
         }

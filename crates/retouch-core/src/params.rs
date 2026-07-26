@@ -359,7 +359,8 @@ pub fn registry() -> Vec<ParamSpec> {
     });
     v.push(ParamSpec {
         label: "提亮".into(),
-        tooltip: "整体画面往上提亮，高光处会自动保护不过曝。越往右提亮的增量按人眼习惯衰减，不易过曝",
+        tooltip:
+            "整体画面往上提亮，高光处会自动保护不过曝。越往右提亮的增量按人眼习惯衰减，不易过曝",
         field: Field::BrightnessLift,
         curve: CurveKind::SoftKnee,
         bipolar: false,

@@ -57,5 +57,12 @@ fn main() {
             if pass { "PASS ✅" } else { "FAIL ❌" }
         );
     }
-    println!("\n总结: {}", if all_pass { "全部 PASS ✅" } else { "存在 FAIL ❌" });
+    println!(
+        "\n总结: {}",
+        if all_pass {
+            "全部 PASS ✅"
+        } else {
+            "存在 FAIL ❌"
+        }
+    );
 }

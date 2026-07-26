@@ -100,7 +100,13 @@ mod tests {
         for p in [-1.0, -0.42, 0.0, 0.17, 0.9] {
             let r = slider_to_raw(CurveKind::SoftKnee, 0.0, 1.0, p);
             let back = raw_to_slider(CurveKind::SoftKnee, 0.0, 1.0, r);
-            assert!((back - p).abs() < 1e-4, "softknee roundtrip {} -> {} -> {}", p, r, back);
+            assert!(
+                (back - p).abs() < 1e-4,
+                "softknee roundtrip {} -> {} -> {}",
+                p,
+                r,
+                back
+            );
         }
         // weighted decay: slope near center > slope near edge
         let slope_mid = slider_to_raw(CurveKind::SoftKnee, 0.0, 1.0, 0.1)
@@ -127,6 +133,9 @@ mod tests {
             - raw_to_slider(CurveKind::LogSat, 1.0, 3.0, 1.0);
         let dp2 = raw_to_slider(CurveKind::LogSat, 1.0, 3.0, 1.0)
             - raw_to_slider(CurveKind::LogSat, 1.0, 3.0, 0.5);
-        assert!((dp1 - dp2).abs() < 1e-4, "log-sat steps must be perceptually equal");
+        assert!(
+            (dp1 - dp2).abs() < 1e-4,
+            "log-sat steps must be perceptually equal"
+        );
     }
 }

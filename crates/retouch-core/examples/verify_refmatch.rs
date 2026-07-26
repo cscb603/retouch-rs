@@ -34,13 +34,29 @@ fn main() {
         m_src.exposure.highlight_clip_pct,
     );
 
-    println!("src  : {:<28} med={:.3} mean={:.3} hiClip={:.2}",
-        short(src_path), m_src.tone.median_l, m_src.tone.mean_l, m_src.exposure.highlight_clip_pct);
-    println!("ref  : {:<28} med={:.3} mean={:.3} hiClip={:.2}",
-        short(ref_path), m_ref.tone.median_l, m_ref.tone.mean_l, m_ref.exposure.highlight_clip_pct);
-    println!("after: med={:.3} mean={:.3} hiClip={:.2} | strength={:.2} ev={:.2} tmap={:?}",
-        m_after.tone.median_l, m_after.tone.mean_l, m_after.exposure.highlight_clip_pct,
-        strength, adj.exposure_ev, adj.tone_map);
+    println!(
+        "src  : {:<28} med={:.3} mean={:.3} hiClip={:.2}",
+        short(src_path),
+        m_src.tone.median_l,
+        m_src.tone.mean_l,
+        m_src.exposure.highlight_clip_pct
+    );
+    println!(
+        "ref  : {:<28} med={:.3} mean={:.3} hiClip={:.2}",
+        short(ref_path),
+        m_ref.tone.median_l,
+        m_ref.tone.mean_l,
+        m_ref.exposure.highlight_clip_pct
+    );
+    println!(
+        "after: med={:.3} mean={:.3} hiClip={:.2} | strength={:.2} ev={:.2} tmap={:?}",
+        m_after.tone.median_l,
+        m_after.tone.mean_l,
+        m_after.exposure.highlight_clip_pct,
+        strength,
+        adj.exposure_ev,
+        adj.tone_map
+    );
     println!("{}", verdict);
 }
 
@@ -52,18 +68,34 @@ fn judge(src_med: f32, ref_med: f32, after_med: f32, after_hi: f32, src_hi: f32)
     // 2) 应朝 reference 靠拢（方向正确）
     let moved_toward = (after_med - src_med).signum() == (ref_med - src_med).signum();
     if !moved_toward {
-        return format!("✗ 方向反了 (src {:.3} -> {:.3}, ref {:.3})", src_med, after_med, ref_med);
+        return format!(
+            "✗ 方向反了 (src {:.3} -> {:.3}, ref {:.3})",
+            src_med, after_med, ref_med
+        );
     }
     // 3) 幅度合理：不应一步到位或超过 reference
     let overshoot = (after_med - ref_med).abs() > (src_med - ref_med).abs();
     if overshoot {
-        return format!("✗ 过冲超过参考 (after {:.3} > ref {:.3})", after_med, ref_med);
+        return format!(
+            "✗ 过冲超过参考 (after {:.3} > ref {:.3})",
+            after_med, ref_med
+        );
     }
-    format!("✓ 朝参考靠拢且未过曝 (src {:.3} -> after {:.3} -> ref {:.3})", src_med, after_med, ref_med)
+    format!(
+        "✓ 朝参考靠拢且未过曝 (src {:.3} -> after {:.3} -> ref {:.3})",
+        src_med, after_med, ref_med
+    )
 }
 
 fn short(p: &str) -> String {
-    let n = std::path::Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let n = std::path::Path::new(p)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     let chars: Vec<char> = n.chars().collect();
-    if chars.len() > 22 { chars.iter().skip(chars.len()-22).collect() } else { n }
+    if chars.len() > 22 {
+        chars.iter().skip(chars.len() - 22).collect()
+    } else {
+        n
+    }
 }

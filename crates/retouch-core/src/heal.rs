@@ -12,8 +12,8 @@
 //! - 所有运算仅在污点局部 bounding box 上进行，分辨率无关、体量极小、预览实时。
 //! - 任何异常都回退原图（或 Telea），绝不崩。
 
-use image::{GenericImageView, GrayImage, Rgb, RgbImage};
 use crate::spot::{HealMode, SpotFix};
+use image::{GenericImageView, GrayImage, Rgb, RgbImage};
 
 /// 对整张 RGB 图施加一组污点笔画的修复（按 mode 分派）。空笔画 = 恒等。
 ///
@@ -44,8 +44,13 @@ fn heal_strokes(img: &RgbImage, spot: &SpotFix, poisson: bool, preview: bool) ->
         if r < 1 {
             continue;
         }
-        // 找源块；找不到 → 退化为 Telea 局部兜底（仅此笔画）。
-        if let Some((sx, sy)) = find_source(&out, cx, cy, r) {
+        // 找源块（PatchMatch 全局+边缘感知）；找不到 → 退化为 Telea 局部兜底（仅此笔画）。
+        let (pm_iters, pm_step) = if preview {
+            (4u32, (r / 2).max(3))
+        } else {
+            (10u32, (r / 3).max(2))
+        };
+        if let Some((sx, sy)) = patchmatch_source_center(&out, cx, cy, r, pm_iters, pm_step) {
             if poisson {
                 poisson_heal(&mut out, cx, cy, r, sx, sy, iters);
             } else {
@@ -58,69 +63,178 @@ fn heal_strokes(img: &RgbImage, spot: &SpotFix, poisson: bool, preview: bool) ->
     out
 }
 
-/// 在污点周围环形区域搜索最佳源块中心 (sx, sy)。
-/// 环形：内半径 R+max(R/2,2)，外半径 min(R*3, 短边/2 - R)。
-/// 候选点按角度均匀采样，跳过压到洞上或越界的；按边界 SSD 打分挑最小。
-fn find_source(img: &RgbImage, cx: i32, cy: i32, r: i32) -> Option<(i32, i32)> {
+/// 边缘感知描述子：亮度 + x/y 梯度（中心差分）。
+/// 比旧 `lum`（纯亮度）多两维梯度，使源块在「纹理/边缘」上也对齐，
+/// 杜绝「一样亮但纹理/光照不匹配」的搬移（PS 修复画笔同款思路）。
+#[inline]
+fn edge_feat(img: &RgbImage, x: i32, y: i32) -> [f32; 3] {
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let lum = |xx: i32, yy: i32| -> f32 {
+        let xx = xx.clamp(0, w - 1);
+        let yy = yy.clamp(0, h - 1);
+        let p = img.get_pixel(xx as u32, yy as u32);
+        0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32
+    };
+    let x = x.clamp(0, w - 1);
+    let y = y.clamp(0, h - 1);
+    let l_c = lum(x, y);
+    let gx = lum(x + 1, y) - lum(x - 1, y);
+    let gy = lum(x, y + 1) - lum(x, y - 1);
+    [l_c, gx, gy]
+}
+
+/// 洞上下文环 vs 候选源对应点的加权 SSD。
+/// 边缘样本（|Gx|+|Gy| 大）权重高 → 强边必须对齐，弱区可宽松。
+fn context_ssd(
+    img: &RgbImage,
+    cx: i32,
+    cy: i32,
+    sx: i32,
+    sy: i32,
+    hole: &[(i32, i32, [f32; 3])],
+    edge_w: f32,
+) -> f32 {
+    let mut sum = 0.0;
+    for &(hx, hy, hf) in hole.iter() {
+        let px = hx + (sx - cx);
+        let py = hy + (sy - cy);
+        let sf = edge_feat(img, px, py);
+        let w = 1.0 + edge_w * (hf[1].abs() + hf[2].abs());
+        for k in 0..3 {
+            let d = hf[k] - sf[k];
+            sum += w * d * d;
+        }
+    }
+    sum
+}
+
+/// PatchMatch 风格源搜索：返回洞 (cx,cy,r) 的最佳源块中心 (sx,sy)。
+///
+/// - 预计算洞外上下文环特征（一次），喂给 `context_ssd`。
+/// - 候选数 ≤ `EXHAUSTIVE_CAP` → 穷举（确定性、精确最优，小图/测试走此路径）。
+/// - 否则走 PatchMatch 随机搜索（大图加速，固定种子 LCG → 同输入同结果）。
+/// - 找不到任何合法源（极小图）→ None（调用方退 `telea_single`）。
+///
+/// 替换旧 `find_source`（仅洞周 1–3R 环形 + 纯亮度 SSD）。本函数可达全局、
+/// 且用边缘感知描述子，故源块纹理/光照/边缘与洞周连贯（更自然）。
+fn patchmatch_source_center(
+    img: &RgbImage,
+    cx: i32,
+    cy: i32,
+    r: i32,
+    iters: u32,
+    step: i32,
+) -> Option<(i32, i32)> {
     let (w, h) = img.dimensions();
-    let r_in = r + (r / 2).max(2);
-    let r_out = ((r as f32 * 3.0) as i32).min((w.min(h) as i32) / 2 - r).max(r_in + 1);
-    if r_out <= r_in {
+    let (w, h) = (w as i32, h as i32);
+    // 洞 bbox 越界即无合法源。
+    if cx - r < 0 || cy - r < 0 || cx + r >= w || cy + r >= h {
         return None;
     }
-    let step = ((r / 3).max(2)) as usize;
-    let mut best: Option<(i32, i32, f32)> = None;
-    let mut rad = r_in;
-    while rad <= r_out {
-        let circ = 2.0 * std::f32::consts::PI * rad as f32;
-        let n = ((circ / step as f32).max(6.0)) as i32;
-        for k in 0..n {
-            let a = 2.0 * std::f32::consts::PI * k as f32 / n as f32;
-            let sx = cx + (rad as f32 * a.cos()).round() as i32;
-            let sy = cy + (rad as f32 * a.sin()).round() as i32;
-            if sx < r || sy < r || sx + r >= w as i32 || sy + r >= h as i32 {
-                continue;
-            }
-            // 源块不能压到洞上（中心距需 > 2R）。
-            let dx = sx - cx;
-            let dy = sy - cy;
-            if (dx * dx + dy * dy) as f32 <= (2.0 * r as f32).powi(2) {
-                continue;
-            }
-            let score = boundary_match(img, cx, cy, r, sx, sy);
-            if best.is_none() || score < best.unwrap().2 {
-                best = Some((sx, sy, score));
+    // 预计算洞上下文环特征（只算一次）。
+    let ctx = (r / 2).max(2);
+    let stride = (r / 4).max(1);
+    let r0 = r as f32;
+    let r1 = (r + ctx) as f32;
+    let mut hole: Vec<(i32, i32, [f32; 3])> = Vec::new();
+    for y in (cy - (r + ctx)..=cy + (r + ctx)).step_by(stride as usize) {
+        for x in (cx - (r + ctx)..=cx + (r + ctx)).step_by(stride as usize) {
+            let dx = x - cx;
+            let dy = y - cy;
+            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            if dist >= r0 && dist <= r1 {
+                hole.push((x, y, edge_feat(img, x, y)));
             }
         }
-        rad += step as i32;
     }
-    best.map(|(x, y, _)| (x, y))
-}
-
-/// 边界匹配打分：比较「源块边界环」与「污点边界环」亮度 SSD，越低越连续。
-fn boundary_match(img: &RgbImage, cx: i32, cy: i32, r: i32, sx: i32, sy: i32) -> f32 {
-    let n = (r * 2).max(16) as i32;
-    let (w, h) = (img.width() as i32, img.height() as i32);
-    let mut sum = 0.0;
-    for k in 0..n {
-        let a = 2.0 * std::f32::consts::PI * k as f32 / n as f32;
-        let dx = (r as f32 * a.cos()).round() as i32;
-        let dy = (r as f32 * a.sin()).round() as i32;
-        let hx = (cx + dx).clamp(0, w - 1);
-        let hy = (cy + dy).clamp(0, h - 1);
-        let spx = (sx + dx).clamp(0, w - 1);
-        let spy = (sy + dy).clamp(0, h - 1);
-        let hv = lum(img.get_pixel(hx as u32, hy as u32));
-        let sv = lum(img.get_pixel(spx as u32, spy as u32));
-        let d = hv - sv;
-        sum += d * d;
+    if hole.is_empty() {
+        return None;
     }
-    sum / n as f32
-}
+    let edge_w = 0.01f32;
+    let no_overlap = |sx: i32, sy: i32| -> bool {
+        let dx = sx - cx;
+        let dy = sy - cy;
+        (dx * dx + dy * dy) as f32 > (2.0 * r as f32).powi(2)
+    };
 
-#[inline]
-fn lum(p: &Rgb<u8>) -> f32 {
-    0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32
+    // 穷举路径：候选数 ≤ CAP → 精确最优（确定性）。
+    const CAP: i32 = 4000;
+    let mut count = 0i32;
+    {
+        let mut sx = r;
+        while sx + r < w {
+            let mut sy = r;
+            while sy + r < h {
+                if no_overlap(sx, sy) {
+                    count += 1;
+                }
+                sy += step;
+            }
+            sx += step;
+        }
+    }
+    if count <= CAP {
+        let mut best: Option<(i32, i32, f32)> = None;
+        let mut sx = r;
+        while sx + r < w {
+            let mut sy = r;
+            while sy + r < h {
+                if no_overlap(sx, sy) {
+                    let s = context_ssd(img, cx, cy, sx, sy, &hole, edge_w);
+                    if best.is_none() || s < best.unwrap().2 {
+                        best = Some((sx, sy, s));
+                    }
+                }
+                sy += step;
+            }
+            sx += step;
+        }
+        return best.map(|(x, y, _)| (x, y));
+    }
+
+    // PatchMatch 随机搜索路径（大图加速）。固定种子 LCG → 可复现。
+    let mut seed: u64 =
+        ((cx as u64) * 73856093) ^ ((cy as u64) * 19349663) ^ ((r as u64) * 83492791);
+    let mut rng = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as f32 / (u32::MAX as f32 + 1.0)
+    };
+    let mut best: Option<(i32, i32, f32)> = None;
+    let mut tries = 0;
+    while best.is_none() && tries < 200 {
+        tries += 1;
+        let sx = r + (rng() * (w - 2 * r) as f32) as i32;
+        let sy = r + (rng() * (h - 2 * r) as f32) as i32;
+        if no_overlap(sx, sy) {
+            let s = context_ssd(img, cx, cy, sx, sy, &hole, edge_w);
+            best = Some((sx, sy, s));
+        }
+    }
+    let (mut bx, mut by, mut bscore) = match best {
+        Some(v) => (v.0, v.1, v.2),
+        None => return None,
+    };
+    let max_dim = (w.max(h)) as f32;
+    for it in 0..iters as i32 {
+        let w_radius = (max_dim / 2.0) * 0.5_f32.powi(it);
+        for _ in 0..8 {
+            let off_x = ((rng() * 2.0 - 1.0) * w_radius) as i32;
+            let off_y = ((rng() * 2.0 - 1.0) * w_radius) as i32;
+            let sx = bx + off_x;
+            let sy = by + off_y;
+            if sx >= r && sy >= r && sx + r < w && sy + r < h && no_overlap(sx, sy) {
+                let s = context_ssd(img, cx, cy, sx, sy, &hole, edge_w);
+                if s < bscore {
+                    bx = sx;
+                    by = sy;
+                    bscore = s;
+                }
+            }
+        }
+    }
+    Some((bx, by))
 }
 
 /// 频率分离融合：源块高频纹理 + 目标邻域低频光照，disk 内填充、外缘 cosine 羽化。
@@ -288,27 +402,28 @@ fn poisson_heal(img: &mut RgbImage, cx: i32, cy: i32, r: i32, sx: i32, sy: i32, 
                     for (ddx, ddy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
                         let nx = x as i32 + ddx;
                         let ny = y as i32 + ddy;
-                        let (nb_val, gs, gt) = if nx >= 0
-                            && ny >= 0
-                            && (nx as usize) < d
-                            && (ny as usize) < d
-                        {
-                            let nidx = (ny as usize * d + nx as usize) * 3;
-                            let nb = if in_mask[ny as usize * d + nx as usize] {
-                                f[nidx + c]
+                        let (nb_val, gs, gt) =
+                            if nx >= 0 && ny >= 0 && (nx as usize) < d && (ny as usize) < d {
+                                let nidx = (ny as usize * d + nx as usize) * 3;
+                                let nb = if in_mask[ny as usize * d + nx as usize] {
+                                    f[nidx + c]
+                                } else {
+                                    tgt[nidx + c]
+                                };
+                                let gs = src[nidx + c] - src[idx + c];
+                                let gt = tgt[nidx + c] - tgt[idx + c];
+                                (nb, gs, gt)
                             } else {
-                                tgt[nidx + c]
+                                // 越界：用 box 内最近的边界目标值。
+                                let cxp = x.clamp(0, d - 1);
+                                let cyp = y.clamp(0, d - 1);
+                                let nidx = (cyp * d + cxp) * 3;
+                                (
+                                    tgt[nidx + c],
+                                    src[nidx + c] - src[idx + c],
+                                    tgt[nidx + c] - tgt[idx + c],
+                                )
                             };
-                            let gs = src[nidx + c] - src[idx + c];
-                            let gt = tgt[nidx + c] - tgt[idx + c];
-                            (nb, gs, gt)
-                        } else {
-                            // 越界：用 box 内最近的边界目标值。
-                            let cxp = x.clamp(0, d - 1);
-                            let cyp = y.clamp(0, d - 1);
-                            let nidx = (cyp * d + cxp) * 3;
-                            (tgt[nidx + c], src[nidx + c] - src[idx + c], tgt[nidx + c] - tgt[idx + c])
-                        };
                         sumf += nb_val;
                         // 纯源梯度克隆（Pérez seamless cloning）：洞内梯度场取源块，
                         // 边界 Dirichlet 固定为目标。这样缺陷的「假强边」不会污染求解，
@@ -346,7 +461,9 @@ fn telea_single(img: &mut RgbImage, cx: i32, cy: i32, r: i32) {
     let d = 2 * rr + 3;
     let bx = (cx - rr as i32 - 1).clamp(0, (w as i32) - d as i32);
     let by = (cy - rr as i32 - 1).clamp(0, (h as i32) - d as i32);
-    let sub = img.view(bx as u32, by as u32, d as u32, d as u32).to_image();
+    let sub = img
+        .view(bx as u32, by as u32, d as u32, d as u32)
+        .to_image();
     // 在 ROI 内构造 disk mask（中心 = rr+1）。
     let mut mask = GrayImage::new(d as u32, d as u32);
     let cc = rr as i32 + 1;
@@ -362,7 +479,11 @@ fn telea_single(img: &mut RgbImage, cx: i32, cy: i32, r: i32) {
     let inp = crate::spot::inpaint_rgb(&sub, &mask, (r + 1).clamp(1, 60));
     for y in 0..d as u32 {
         for x in 0..d as u32 {
-            img.put_pixel((bx + x as i32) as u32, (by + y as i32) as u32, *inp.get_pixel(x, y));
+            img.put_pixel(
+                (bx + x as i32) as u32,
+                (by + y as i32) as u32,
+                *inp.get_pixel(x, y),
+            );
         }
     }
 }
@@ -465,11 +586,7 @@ mod tests {
         spot.mode = HealMode::FreqSep;
         spot.add_stroke(0.5, 0.5, 0.07);
         let out = heal_image(&img, &spot, false);
-        assert_eq!(
-            out.get_pixel(2, 2).0,
-            [200u8, 180, 160],
-            "角落被误改"
-        );
+        assert_eq!(out.get_pixel(2, 2).0, [200u8, 180, 160], "角落被误改");
         let _ = DynamicImage::ImageRgb8(out);
     }
 
@@ -481,12 +598,95 @@ mod tests {
 
     #[test]
     fn poisson_no_panic_on_small_image() {
-        // 极小的图也应安全返回（环形候选区可能为空 → Telea 兜底）。
+        // 极小的图也应安全返回（候选区可能为空 → Telea 兜底）。
         let img = RgbImage::from_pixel(16, 16, Rgb([120u8, 90, 200]));
         let mut spot = SpotFix::new();
         spot.mode = HealMode::Poisson;
         spot.add_stroke(0.5, 0.5, 0.2);
         let out = heal_image(&img, &spot, false);
         assert_eq!(out.dimensions(), (16, 16));
+    }
+
+    #[test]
+    fn patchmatch_reaches_global_source() {
+        // 左半竖向细条纹(A)、右半横向粗条纹(B)，两区平均亮度相同（旧纯亮度 SSD 无法区分）。
+        // 污点完全落在左半 A（上下文=竖向纹理）。PatchMatch 边缘感知应选中同纹理（左半）源。
+        let w = 160i32;
+        let h = 96i32;
+        let mut img = RgbImage::new(w as u32, h as u32);
+        for y in 0..h as u32 {
+            for x in 0..w as u32 {
+                let (r, g, b) = if (x as i32) < w / 2 {
+                    let v = if x % 4 < 2 { 230u8 } else { 50u8 }; // 竖向细条纹
+                    (v, v, v)
+                } else {
+                    let v = if y % 16 < 8 { 230u8 } else { 50u8 }; // 横向粗条纹（同亮度）
+                    (v, v, v)
+                };
+                img.put_pixel(x, y, Rgb([r, g, b]));
+            }
+        }
+        let cx = 30i32; // 完全在左半，远离中线
+        let cy = h / 2;
+        let r = 10i32;
+        let chosen =
+            patchmatch_source_center(&img, cx, cy, r, 10, (r / 3).max(2)).expect("应找到源");
+        // 源应落在同纹理（左半）侧：竖向条纹上下文只能由左半匹配。
+        assert!(
+            chosen.0 < w / 2,
+            "PatchMatch 应选中同纹理（左半）源，实际 sx={}（>= {}）",
+            chosen.0,
+            w / 2
+        );
+    }
+
+    #[test]
+    fn patchmatch_edge_aware_matches_texture_energy() {
+        // 全局竖向条纹（同纹理处处一致）。断言选中源的纹理能量（梯度幅值均值）与洞周接近，
+        // 证明边缘感知描述子生效（而非仅亮度匹配），选出的源确实纹理连贯。
+        let w = 160i32;
+        let h = 96i32;
+        let mut img = RgbImage::new(w as u32, h as u32);
+        for y in 0..h as u32 {
+            for x in 0..w as u32 {
+                let v = if x % 4 < 2 { 220u8 } else { 40u8 }; // 均匀竖向条纹
+                img.put_pixel(x, y, Rgb([v, v, v]));
+            }
+        }
+        let cx = w / 2;
+        let cy = h / 2;
+        let r = 10i32;
+        let chosen =
+            patchmatch_source_center(&img, cx, cy, r, 10, (r / 3).max(2)).expect("应找到源");
+        let energy = |ccx: i32, ccy: i32| -> f32 {
+            let c = (r / 2).max(2);
+            let mut s = 0.0;
+            let mut n = 0;
+            for yy in (ccy - (r + c)..=ccy + (r + c)).step_by(2) {
+                for xx in (ccx - (r + c)..=ccx + (r + c)).step_by(2) {
+                    let dx = xx - ccx;
+                    let dy = yy - ccy;
+                    let d = ((dx * dx + dy * dy) as f32).sqrt();
+                    if d >= r as f32 && d <= (r + c) as f32 {
+                        let f = edge_feat(&img, xx, yy);
+                        s += (f[1].abs() + f[2].abs());
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 {
+                s / n as f32
+            } else {
+                0.0
+            }
+        };
+        let e_hole = energy(cx, cy);
+        let e_src = energy(chosen.0, chosen.1);
+        let ratio = if e_hole > 1e-3 { e_src / e_hole } else { 1.0 };
+        assert!(
+            ratio > 0.5 && ratio < 2.0,
+            "选中源纹理能量应与洞周接近（ratio={}）",
+            ratio
+        );
     }
 }

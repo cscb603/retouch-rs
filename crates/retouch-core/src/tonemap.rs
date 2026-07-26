@@ -136,7 +136,11 @@ pub fn classify_tonality(m: &ImageMetrics) -> Tonality {
 /// 暗部找回 / 鲜艳度 / 去雾），**保护类**（曝光位置 / 白平衡 / 色调映射 / mix）不缩放 —
 /// 这正是用户要的「按影调类型决定哪里加强、哪里保护」：低调不加全局反差只找回暗部、
 /// 高调保护高光这套按影调的逻辑对所有档位都成立，强档只是把针对该影调的修正放大。
-pub fn tonal_adjustments(img: &DynamicImage, smart_compensation: bool, strength: f32) -> Adjustments {
+pub fn tonal_adjustments(
+    img: &DynamicImage,
+    smart_compensation: bool,
+    strength: f32,
+) -> Adjustments {
     let base = crate::analyze::analyze(img);
     let bal = auto_neutral_balance(img, smart_compensation);
     let t = classify_tonality(&base);
@@ -186,20 +190,21 @@ pub fn tonal_adjustments(img: &DynamicImage, smart_compensation: bool, strength:
     //       film_curve/light_ratio 给胶片感自然 rolloff（护高光护阴影，不硬切）。
     // 中调：明确给反差与胶片感（之前 contrast=0 导致"几乎没修"）——这是最常见的照片
     // 高调：允许提升/乳白过曝。
-    let (mut contrast, mut film_curve, mut light_ratio, mut shadow_lift, mut deep_shadow_lift) = match (t.key, t.span) {
-        // 低调：保护暗部，但给足中长调的胶片反差与暗部细节（不整体提亮）
-        (Key::Low, Span::Short) => (0.08, 0.10, 0.08, 0.12, 0.08),
-        (Key::Low, Span::Mid) => (0.14, 0.16, 0.15, 0.10, 0.06),
-        (Key::Low, Span::Long) => (0.20, 0.18, 0.20, 0.08, 0.05),
-        // 中调：明显可感知的反差与胶片感
-        (Key::Mid, Span::Short) => (0.18, 0.10, 0.08, 0.05, 0.03),
-        (Key::Mid, Span::Mid) => (0.24, 0.14, 0.16, 0.0, 0.0),
-        (Key::Mid, Span::Long) => (0.28, 0.14, 0.18, 0.0, 0.0),
-        // 高调：允许乳白/提亮，给足反差
-        (Key::High, Span::Short) => (0.10, 0.08, 0.12, 0.0, 0.0),
-        (Key::High, Span::Mid) => (0.18, 0.12, 0.16, 0.0, 0.0),
-        (Key::High, Span::Long) => (0.24, 0.14, 0.18, 0.0, 0.0),
-    };
+    let (mut contrast, mut film_curve, mut light_ratio, mut shadow_lift, mut deep_shadow_lift) =
+        match (t.key, t.span) {
+            // 低调：保护暗部，但给足中长调的胶片反差与暗部细节（不整体提亮）
+            (Key::Low, Span::Short) => (0.08, 0.10, 0.08, 0.12, 0.08),
+            (Key::Low, Span::Mid) => (0.14, 0.16, 0.15, 0.10, 0.06),
+            (Key::Low, Span::Long) => (0.20, 0.18, 0.20, 0.08, 0.05),
+            // 中调：明显可感知的反差与胶片感
+            (Key::Mid, Span::Short) => (0.18, 0.10, 0.08, 0.05, 0.03),
+            (Key::Mid, Span::Mid) => (0.24, 0.14, 0.16, 0.0, 0.0),
+            (Key::Mid, Span::Long) => (0.28, 0.14, 0.18, 0.0, 0.0),
+            // 高调：允许乳白/提亮，给足反差
+            (Key::High, Span::Short) => (0.10, 0.08, 0.12, 0.0, 0.0),
+            (Key::High, Span::Mid) => (0.18, 0.12, 0.16, 0.0, 0.0),
+            (Key::High, Span::Long) => (0.24, 0.14, 0.18, 0.0, 0.0),
+        };
 
     // 按强度缩放「增强类」字段：弱档轻、强档狠（保护类曝光/白平衡/色调映射不缩放）。
     contrast *= strength;

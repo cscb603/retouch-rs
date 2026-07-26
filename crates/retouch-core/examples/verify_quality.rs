@@ -61,10 +61,17 @@ fn main() {
         };
 
         // 质量判定（用中位数：基调是否守住/放对位置）
-        let verdict = judge(t.key, base.tone.median_l, mfin.tone.median_l, target_l,
-                            mfin.exposure.highlight_clip_pct, base.exposure.highlight_clip_pct,
-                            mfin.exposure.shadow_clip_pct, base.exposure.shadow_clip_pct,
-                            mfin.skin.mean_l);
+        let verdict = judge(
+            t.key,
+            base.tone.median_l,
+            mfin.tone.median_l,
+            target_l,
+            mfin.exposure.highlight_clip_pct,
+            base.exposure.highlight_clip_pct,
+            mfin.exposure.shadow_clip_pct,
+            base.exposure.shadow_clip_pct,
+            mfin.skin.mean_l,
+        );
 
         let name = std::path::Path::new(path)
             .file_name()
@@ -115,7 +122,7 @@ fn judge(
     // 高调允许均匀乳白过曝，不判死白；中/低调新增死白=毁
     let hi_ok = match key {
         retouch_core::tonemap::Key::High => after_hi <= base_hi + 3.0, // 高调允许略增
-        _ => after_hi <= base_hi + 0.5, // 中/低调几乎不新增死白
+        _ => after_hi <= base_hi + 0.5,                                // 中/低调几乎不新增死白
     };
     if !hi_ok {
         return "✗ 高光死白新增";

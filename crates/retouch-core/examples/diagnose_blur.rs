@@ -109,17 +109,15 @@ fn main() {
     a.advanced = Advanced::default();
     variants.push(("关 advanced(磨皮/融合)", a));
 
-    println!("{:<42} | {:>10} | {:>12}", "关掉该字段", "清晰度", "相对原图%");
+    println!(
+        "{:<42} | {:>10} | {:>12}",
+        "关掉该字段", "清晰度", "相对原图%"
+    );
     println!("{}", "-".repeat(90));
     let base_s = sharpness(&base);
     for (name, vadj) in variants {
         let out = render(&small, &vadj);
         let s = sharpness(&out);
-        println!(
-            "{:<42} | {:>10.1} | {:>11.1}%",
-            name,
-            s,
-            100.0 * s / base_s
-        );
+        println!("{:<42} | {:>10.1} | {:>11.1}%", name, s, 100.0 * s / base_s);
     }
 }

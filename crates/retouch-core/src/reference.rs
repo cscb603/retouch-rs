@@ -56,7 +56,7 @@ fn ref_score(m: &ImageMetrics, r: &ImageMetrics) -> f32 {
     // 整体色调：参考图与主图平均色相的差异（取最短路径，避免 350° vs 10° 这种跳变）。
     let dh = hue_shortest_diff(r.color.mean_h_deg, m.color.mean_h_deg).abs();
     d += dh * 0.04; // 60° 色调差 ≈ 2.4 距离单位，足够影响选优
-    // 色偏向量差值（a/b 平面，与 auto_wb 同思路）：让源色偏朝参考色偏靠拢。
+                    // 色偏向量差值（a/b 平面，与 auto_wb 同思路）：让源色偏朝参考色偏靠拢。
     let sv = cast_vec(m);
     let rv = cast_vec(r);
     let da = sv.0 - rv.0;
@@ -145,8 +145,12 @@ fn ref_step(cur: &Adjustments, m: &ImageMetrics, r: &ImageMetrics) -> Adjustment
     // 参考图若有明显暖/冷调，给暗部/高光加 split-tone 以贴近其氛围。
     if r.cast.chroma > 0.06 {
         let ref_h = r.cast.hue_deg;
-        a.color.split_shadow = (a.color.split_shadow + hue_shortest_diff(ref_h, a.color.split_shadow) * 0.10).clamp(-45.0, 45.0);
-        a.color.split_highlight = (a.color.split_highlight + hue_shortest_diff(ref_h, a.color.split_highlight) * 0.08).clamp(-45.0, 45.0);
+        a.color.split_shadow = (a.color.split_shadow
+            + hue_shortest_diff(ref_h, a.color.split_shadow) * 0.10)
+            .clamp(-45.0, 45.0);
+        a.color.split_highlight = (a.color.split_highlight
+            + hue_shortest_diff(ref_h, a.color.split_highlight) * 0.08)
+            .clamp(-45.0, 45.0);
     }
 
     a

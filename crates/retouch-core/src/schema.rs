@@ -41,21 +41,37 @@ pub struct ParamSchemaEntry {
 fn group_of(f: &Field) -> &'static str {
     match f {
         Field::ExposureEv => "exposure",
-        Field::FilmCurve | Field::LightRatio | Field::BrightnessLift | Field::Contrast
-        | Field::Dehaze | Field::ShadowLift | Field::DeepShadowLift => "tone",
+        Field::FilmCurve
+        | Field::LightRatio
+        | Field::BrightnessLift
+        | Field::Contrast
+        | Field::Dehaze
+        | Field::ShadowLift
+        | Field::DeepShadowLift => "tone",
         Field::WBTemp | Field::WBTint => "white_balance",
-        Field::Saturation | Field::Vibrance | Field::HueRotate | Field::SplitShadow
+        Field::Saturation
+        | Field::Vibrance
+        | Field::HueRotate
+        | Field::SplitShadow
         | Field::SplitHighlight => "color",
-        Field::SkinStrength | Field::SkinHue | Field::SkinChroma | Field::SkinLight
-        | Field::SkinYellowReduce | Field::SkinLighten | Field::SkinRedden | Field::SkinPinken => {
-            "skin"
-        }
+        Field::SkinStrength
+        | Field::SkinHue
+        | Field::SkinChroma
+        | Field::SkinLight
+        | Field::SkinYellowReduce
+        | Field::SkinLighten
+        | Field::SkinRedden
+        | Field::SkinPinken => "skin",
         Field::HslHue(_) | Field::HslSat(_) | Field::HslLight(_) => "hsl",
         Field::Zone(_) => "zone",
         Field::GeomRotate | Field::GeomPerspV | Field::GeomPerspH => "geometry",
         Field::DetailDenoise | Field::DetailSharpen | Field::DetailDiffuse => "detail",
-        Field::FreqSepStrength | Field::FreqSepTexture | Field::FreqSepSmooth
-        | Field::FreqSepFeather | Field::PyramidStrength | Field::PyramidScale => "advanced",
+        Field::FreqSepStrength
+        | Field::FreqSepTexture
+        | Field::FreqSepSmooth
+        | Field::FreqSepFeather
+        | Field::PyramidStrength
+        | Field::PyramidScale => "advanced",
     }
 }
 

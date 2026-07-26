@@ -51,7 +51,11 @@ pub fn check(m: &ImageMetrics, base: &ImageMetrics) -> GuardrailStatus {
     // 整体亮度上限：中/低调 mean_l > 0.62 即明显发白/过曝（惨白毁图）；
     // 高调图（基线中位数已 >0.58，本就明亮/乳白）放宽到 0.70，否则把雪景/日系
     // 等健康高调照误拦成"毁图"→ 自动修图失效。
-    let bright_cap = if base.tone.median_l > 0.58 { 0.70 } else { 0.62 };
+    let bright_cap = if base.tone.median_l > 0.58 {
+        0.70
+    } else {
+        0.62
+    };
     if m.tone.mean_l > bright_cap {
         reasons.push(format!(
             "整体亮度过高/发白 mean_l {:.3} > {:.2}",
@@ -82,7 +86,10 @@ pub fn check(m: &ImageMetrics, base: &ImageMetrics) -> GuardrailStatus {
     let cast = m.cast.chroma;
     let bcast = base.cast.chroma;
     if cast > bcast + 0.05 {
-        reasons.push(format!("偏色增长 chroma {:.3} > 基线 {:.3}+0.05", cast, bcast));
+        reasons.push(format!(
+            "偏色增长 chroma {:.3} > 基线 {:.3}+0.05",
+            cast, bcast
+        ));
     }
 
     // Global saturation should not jump wildly.

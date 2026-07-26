@@ -19,8 +19,8 @@
 //! *loop and guardrails stay the same*, which is exactly the reusable
 //! "method vs parameters" principle from retouch_app's PLAN.md.
 
-use crate::analyze::{analyze, ImageMetrics};
 use crate::advanced::Advanced;
+use crate::analyze::{analyze, ImageMetrics};
 use crate::color_engine::{analyze_color, color_plan, scene_rules, ColorMetrics};
 use crate::guardrail;
 use crate::guardrail::{goodness, is_artifact, target_for, ToneTarget};
@@ -41,9 +41,17 @@ pub fn auto_correct(m: &ImageMetrics) -> Vec<(Field, f32)> {
 
     // --- exposure: pull mean lightness toward a healthy ~0.52 (never blow past) ---
     if m.tone.mean_l < 0.46 {
-        push(&mut out, Field::ExposureEv, ((0.52 - m.tone.mean_l) * 1.4).min(0.5));
+        push(
+            &mut out,
+            Field::ExposureEv,
+            ((0.52 - m.tone.mean_l) * 1.4).min(0.5),
+        );
     } else if m.tone.mean_l > 0.60 {
-        push(&mut out, Field::ExposureEv, -((m.tone.mean_l - 0.52) * 1.1).min(0.5));
+        push(
+            &mut out,
+            Field::ExposureEv,
+            -((m.tone.mean_l - 0.52) * 1.1).min(0.5),
+        );
     }
 
     // --- flatness / low contrast -> tiny contrast + clarity bump (keep neutral, not stylized) ---
@@ -146,7 +154,11 @@ where
     // proxy image for cheap iteration（提到最前，供 initial 量度使用）
     let (iw, ih) = img.dimensions();
     let proxy = if iw.max(ih) > proxy_max {
-        img.resize(proxy_max, proxy_max * ih / iw, image::imageops::FilterType::Lanczos3)
+        img.resize(
+            proxy_max,
+            proxy_max * ih / iw,
+            image::imageops::FilterType::Lanczos3,
+        )
     } else {
         img.clone()
     };
@@ -333,7 +345,12 @@ fn blend_rgb(proc: &RgbImage, orig: &RgbImage, m: f32) -> RgbImage {
 /// 流程：影调引擎出基线 → 闭环微调（每轮渲代理图→量指标→朝目标带补一档→
 /// 只留更靠近目标带且无伪影的候选）→ 分区融合(多渲染+亮度遮罩软合成，给局部对比/质感)
 /// → 全分辨率出图并复测。Rust 单图处理足够快，多渲染融合可接受。
-pub fn run_auto(img: &DynamicImage, proxy_max: u32, rounds: usize, strength: f32) -> (RgbImage, AutoResult) {
+pub fn run_auto(
+    img: &DynamicImage,
+    proxy_max: u32,
+    rounds: usize,
+    strength: f32,
+) -> (RgbImage, AutoResult) {
     let base = analyze(img);
     let t = classify_tonality(&base);
     let target = target_for(&t);
@@ -390,7 +407,13 @@ pub fn run_auto(img: &DynamicImage, proxy_max: u32, rounds: usize, strength: f32
 ///
 /// `strength` 放大「风格增强」步长（反差/鲜艳），但**曝光位置步长不放大**——曝光是中性
 /// 必须放对的位置，弱强档都该放对；只有风格类（反差/胶片/暗部/鲜艳）随档位强弱。
-fn refine_correction(m: &ImageMetrics, prev: &Adjustments, target: &ToneTarget, tone: &Tonality, strength: f32) -> Adjustments {
+fn refine_correction(
+    m: &ImageMetrics,
+    prev: &Adjustments,
+    target: &ToneTarget,
+    tone: &Tonality,
+    strength: f32,
+) -> Adjustments {
     let mut a = prev.clone();
 
     // 曝光：把中位数拉向目标带中心（小步，避免跳变；**不乘 strength**，位置必须正确）
@@ -444,7 +467,11 @@ fn zone_weights(l: f32) -> (f32, f32, f32) {
     } else {
         0.0
     };
-    let wh = if l > 0.75 { smoothstep(0.75, 1.0, l) } else { 0.0 };
+    let wh = if l > 0.75 {
+        smoothstep(0.75, 1.0, l)
+    } else {
+        0.0
+    };
     let wm = (1.0 - ws - wh).max(0.0);
     (ws, wm, wh)
 }
@@ -452,7 +479,12 @@ fn zone_weights(l: f32) -> (f32, f32, f32) {
 /// 分区影调融合（darktable Tone Equalizer 轻量版，用户要的"多渲染+融合"）：
 /// 渲三份——全局基线 / 暗部提亮版 / 高光压缩版——按原图亮度遮罩软合成，
 /// 实现 dodge&burn、保局部对比=「光比好、有质感」，且低调/剪影主体不被整体提亮。
-fn zone_blend(img: &DynamicImage, base_adj: &Adjustments, _base: &ImageMetrics, strength: f32) -> RgbImage {
+fn zone_blend(
+    img: &DynamicImage,
+    base_adj: &Adjustments,
+    _base: &ImageMetrics,
+    strength: f32,
+) -> RgbImage {
     let g = render(img, base_adj);
 
     // 暗部提亮版（增量随强度放大：强档局部对比更猛，弱档更克制）
@@ -473,8 +505,7 @@ fn zone_blend(img: &DynamicImage, base_adj: &Adjustments, _base: &ImageMetrics, 
     for y in 0..h {
         for x in 0..w {
             let o = orig.get_pixel(x, y).0;
-            let luma =
-                (0.2126 * o[0] as f32 + 0.7152 * o[1] as f32 + 0.0722 * o[2] as f32) / 255.0;
+            let luma = (0.2126 * o[0] as f32 + 0.7152 * o[1] as f32 + 0.0722 * o[2] as f32) / 255.0;
             let (ws, wm, wh) = zone_weights(luma);
             let gp = g.get_pixel(x, y).0;
             let sp = sh.get_pixel(x, y).0;

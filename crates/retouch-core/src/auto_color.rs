@@ -7,8 +7,7 @@
 
 use crate::color_engine::{analyze_color, color_plan, scene_rules, ColorPlan};
 use crate::pipeline::{
-    Adjustments, ColorGrade, DefakeColor, Grade, HslRegions, SkinTone, ToneMapMode,
-    WhiteBalance,
+    Adjustments, ColorGrade, DefakeColor, Grade, HslRegions, SkinTone, ToneMapMode, WhiteBalance,
 };
 use crate::tonemap::classify_tonality;
 use image::DynamicImage;
@@ -263,11 +262,19 @@ pub fn auto_neutral_balance(img: &DynamicImage, smart_compensation: bool) -> Aut
     let (comp_color, comp_grade, comp_hsl) = if smart_compensation {
         render_neutralized_and_reanalyze(img, &WhiteBalance { temp, tint })
     } else {
-        (ColorGrade::default(), Grade::default(), HslRegions::default())
+        (
+            ColorGrade::default(),
+            Grade::default(),
+            HslRegions::default(),
+        )
     };
 
     let excluded_text = if exclude_dominant {
-        format!("，忽略第 {} 号主导色相({:.0}%像素)", dominant_bin, dominant_ratio * 100.0)
+        format!(
+            "，忽略第 {} 号主导色相({:.0}%像素)",
+            dominant_bin,
+            dominant_ratio * 100.0
+        )
     } else {
         String::new()
     };
@@ -316,7 +323,11 @@ fn render_neutralized_and_reanalyze(
 
     fn srgb_to_lin(u: u8) -> f32 {
         let c = u as f32 / 255.0;
-        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
     }
 
     let rgb = img.to_rgb8();
@@ -386,8 +397,6 @@ fn render_neutralized_and_reanalyze(
 
     (color, grade, hsl)
 }
-
-
 
 /// A named film-style preset.
 #[derive(Clone, Debug)]

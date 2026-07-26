@@ -72,7 +72,11 @@ fn main() {
         let base = analyze(&img);
         let raw = auto_neutral_balance(&img, true).to_adjustments();
         let raw_m = metrics_of(&img, &raw);
-        let safe = safe_wrap(&img, &base, auto_neutral_balance(&img, true).to_adjustments());
+        let safe = safe_wrap(
+            &img,
+            &base,
+            auto_neutral_balance(&img, true).to_adjustments(),
+        );
         let safe_m = metrics_of(&img, &safe);
 
         let name = p.rsplit('/').next().unwrap_or(p);
@@ -103,6 +107,16 @@ fn main() {
             }
             (false, true) => "  ⚠裸OK但护栏误伤",
         };
-        println!("    {:>8.3}->{:>8.3} (cap={:.3}){}", raw_m.tone.mean_l, safe_m.tone.mean_l, if base.tone.mean_l > 0.55 { base.tone.mean_l + 0.02 } else { 0.58 }, tag);
+        println!(
+            "    {:>8.3}->{:>8.3} (cap={:.3}){}",
+            raw_m.tone.mean_l,
+            safe_m.tone.mean_l,
+            if base.tone.mean_l > 0.55 {
+                base.tone.mean_l + 0.02
+            } else {
+                0.58
+            },
+            tag
+        );
     }
 }

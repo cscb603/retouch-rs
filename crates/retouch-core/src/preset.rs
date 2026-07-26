@@ -37,10 +37,10 @@
 //! light = 1.0
 //! ```
 
-use crate::pipeline::*;
-use crate::geometry::Geometry;
-use crate::detail::Detail;
 use crate::advanced::{Advanced, FreqSepSkin, PyramidFusion};
+use crate::detail::Detail;
+use crate::geometry::Geometry;
+use crate::pipeline::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -331,7 +331,9 @@ pub struct Preset {
     pub mix: f32,
 }
 
-fn default_mix() -> f32 { 1.0 }
+fn default_mix() -> f32 {
+    1.0
+}
 
 impl Preset {
     /// Load a preset from a TOML file.
@@ -467,7 +469,9 @@ impl Adjustments {
             }
         }
         Preset {
-            exposure: ExposurePreset { ev: self.exposure_ev },
+            exposure: ExposurePreset {
+                ev: self.exposure_ev,
+            },
             tone_map: ToneMapSection {
                 mode: self.tone_map.into(),
             },
@@ -548,8 +552,8 @@ impl Adjustments {
 
 /// Write a preset to a TOML file (pretty-printed).
 pub fn dump_preset(preset: &Preset, path: &Path) -> Result<(), String> {
-    let txt = toml::to_string_pretty(preset)
-        .map_err(|e| format!("cannot serialize preset: {}", e))?;
+    let txt =
+        toml::to_string_pretty(preset).map_err(|e| format!("cannot serialize preset: {}", e))?;
     std::fs::write(path, txt).map_err(|e| format!("cannot write {}: {}", path.display(), e))
 }
 
@@ -661,7 +665,7 @@ mod tests {
         assert!((adj.hsl.sat_mult[5] - 1.4).abs() < 1e-6); // blue sat
         assert!((adj.hsl.hue_shift[0] - 12.0).abs() < 1e-6); // red hue
         assert!((adj.hsl.light_mult[0] - 0.95).abs() < 1e-6); // red light
-        // geometry / detail / advanced preserved through the round-trip.
+                                                              // geometry / detail / advanced preserved through the round-trip.
         assert_eq!(adj.geometry.rotate_deg, 90.0);
         assert_eq!(adj.geometry.quarter_turns, 1);
         assert!(adj.geometry.flip_h);
@@ -690,4 +694,3 @@ mod tests {
         assert_eq!(adj, Adjustments::default());
     }
 }
-

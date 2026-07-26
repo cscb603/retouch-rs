@@ -270,11 +270,7 @@ mod tests {
     fn spot_empty_is_identity() {
         let img = RgbImage::from_pixel(32, 32, Rgb([120u8, 90, 200]));
         let dyn_img = DynamicImage::ImageRgb8(img.clone());
-        let out = render_with_spot(
-            &dyn_img,
-            &crate::pipeline::Adjustments::identity(),
-            None,
-        );
+        let out = render_with_spot(&dyn_img, &crate::pipeline::Adjustments::identity(), None);
         assert_eq!(out.get_pixel(0, 0).0, [120u8, 90, 200]);
     }
 
@@ -297,11 +293,7 @@ mod tests {
         let dist = ((fixed[0] as i32 - 200).abs()
             + (fixed[1] as i32 - 180).abs()
             + (fixed[2] as i32 - 160).abs()) as f32;
-        assert!(
-            dist < 40.0,
-            "污点未被修复到背景附近（dist={}）",
-            dist
-        );
+        assert!(dist < 40.0, "污点未被修复到背景附近（dist={}）", dist);
         // 角落不应被改动。
         assert_eq!(out.get_pixel(2, 2).0, [200u8, 180, 160]);
     }
