@@ -10,7 +10,7 @@ members = [
 # 星TAP Rust 工业级工作流 Release Profile（应用于所有成员 crate）
 [profile.release]
 opt-level = 3
-lto = true
+lto = "thin"
 codegen-units = 1
 strip = "none"  # 留符号名到崩溃报告，方便定位
 # 注意：不用 panic="abort"——abort 会让任何线程的 catch_unwind 失效，

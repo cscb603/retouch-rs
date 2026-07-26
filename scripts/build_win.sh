@@ -10,11 +10,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VER="${1:-0.1.8}"
+VER="${1:-0.6.4}"
 BIN="retouch-rs-gui"
 TARGET="x86_64-pc-windows-msvc"
 SRC="target/$TARGET/release/$BIN.exe"
-PKG_NAME="Retouch-$VER-windows-x64"
+PKG_NAME="初色-$VER-windows-x64"
 OUT_DIR="target/$TARGET/release/pack"
 
 echo "==> 1/4 交叉编译 Windows release ($TARGET)"
@@ -26,26 +26,25 @@ echo "==> 2/4 组装打包目录"
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/$PKG_NAME/fonts"
 
-# 可执行文件改名 Retouch.exe 更友好（字体解析按 current_exe().parent()/fonts 寻路）
-cp "$SRC" "$OUT_DIR/$PKG_NAME/Retouch.exe"
+# 可执行文件改名 初色.exe 更友好
+cp "$SRC" "$OUT_DIR/$PKG_NAME/初色.exe"
 # 随包字体 + 开源许可
 cp "ui/retouch-ui/assets/fonts/NotoSansSC-VF.ttf" "$OUT_DIR/$PKG_NAME/fonts/"
 cp "ui/retouch-ui/assets/fonts/OFL.txt" "$OUT_DIR/$PKG_NAME/"
 
 # 中文说明（UTF-8，Windows 10+ 记事本可直接读；文件名与 Mac 版统一，醒目）
-NOTE_FILE="首次打开必看-Retouch修图.txt"
+NOTE_FILE="首次打开必看-初色.txt"
 cat > "$OUT_DIR/$PKG_NAME/$NOTE_FILE" <<'EOF'
-Retouch 修图 · 首次打开必看（Windows 版，30 秒）
-================================================
+初色 · 轻量修图工具（Windows 版）—— 首次打开必看
+====================================================
 
 【先别慌】
-你拿到的是免费分享版，没有花几百块做"付费代码签名"，
-所以 Windows 第一次可能会拦一下（SmartScreen 报"未知发布者"）。
+你拿到的是免费分享版，Windows 第一次可能会拦一下（SmartScreen 报"未知发布者"）。
 这不是病毒、软件没坏，只是首次需要你点一下"仍要运行"，之后就正常了。
 
 【怎么运行】
-1. 把 Retouch 文件夹解压到任意位置（桌面、D 盘都行，路径可含中文）。
-2. 双击里面的 Retouch.exe 即可，不用安装、不用装任何运行库。
+1. 把「初色」文件夹解压到任意位置（桌面、D 盘都行，路径可含中文）。
+2. 双击里面的 初色.exe 即可，不用安装、不用装任何运行库。
 
 【第一次可能被拦，怎么办？选一种】
 ✦ 方法 A（最常见）
@@ -53,7 +52,7 @@ Retouch 修图 · 首次打开必看（Windows 版，30 秒）
   —— 只需这样一次，以后双击直接进。
 
 ✦ 方法 B（右键解除锁定）
-  1) 在 Retouch.exe 上按【右键】→「属性」
+  1) 在 初色.exe 上按【右键】→「属性」
   2) 底部若有「安全：此文件来自其他计算机…」，
      勾选「解除锁定」→ 确定。
   之后双击就再也不会拦了。
@@ -61,11 +60,17 @@ Retouch 修图 · 首次打开必看（Windows 版，30 秒）
 【注意事项】
 • 界面用了随包的开源「思源黑体」（fonts/ 目录下），别删 fonts 文件夹，
   否则中文会变成方块（豆腐）。
-• 整个 Retouch 文件夹要一起搬，不要只拷 Retouch.exe。
+• 整个文件夹要一起搬，不要只拷 初色.exe。
 
 【支持什么系统】
 • Windows 10 / Windows 11 的 64 位系统（x86_64）均可。
 • 不需要联网、不收集任何信息。
+
+【特色】
+• 30MB，纯本地算法，照片不出电脑
+• 套色/AI追色、感知色彩引擎、HSL分区调色、一键中性化
+• 胶片预设、污点修复、人像美肤、批量导出
+• 永久免费，无订阅
 
 用得不顺或想提建议，随时找分享给你的人就行。祝你修图愉快 🌿
 EOF

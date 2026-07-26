@@ -32,7 +32,7 @@ impl SpotStroke {
     }
 }
 
-/// 污点修复算法档位（v0.6.2）。
+/// 污点修复算法档位。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum HealMode {
     /// 传统 Telea 扩散（保留作兜底，小污点/失败回退）。

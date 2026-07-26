@@ -7,6 +7,9 @@ edition = "2021"
 name = "retouch-rs"
 path = "src/main.rs"
 
+[features]
+default = []
+
 [dependencies]
 retouch-core = { path = "../retouch-core" }
 retouch-agent = { path = "../retouch-agent" }

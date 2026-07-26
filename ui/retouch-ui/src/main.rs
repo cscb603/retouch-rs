@@ -1,8 +1,9 @@
 //! retouch-rs desktop GUI (M4) — egui / eframe.
 //!
-//! ACR-style side panel (every Adjustments field as a slider) + a Cmd+K
-//! command palette. Loads a JPG/TIFF, renders a downscaled preview in
-//! real-time as you drag sliders, and exports full-resolution on Save.
+//! ACR-style side panel + Cmd+K command palette.
+
+// 去掉 Windows 双击时的黑控制台窗口（只对 Windows 有效）
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 //!
 //! GUI-only binary (`retouch-rs-gui`); the engine is `retouch-core`.
 
@@ -386,7 +387,7 @@ impl RetouchApp {
             }
         });
 
-        Self {
+        let app = Self {
             adj: Adjustments::photo_default(),
             src: None,
             src_path: None,
@@ -453,7 +454,9 @@ impl RetouchApp {
             export_rx: None,
             export_total: 0,
             export_done: 0,
-        }
+        };
+
+        app
     }
 
     /// Look up a `ParamSpec` by field (cloned — cheap, ~40 small structs).
@@ -1337,6 +1340,7 @@ impl RetouchApp {
     /// 后台全分辨率解码：切图/打开统一入口。瞬时清掉旧预览显示"载入中…"，
     /// 解码 + 指标分析在线程里完成，带 gen 令牌——poll 只采纳最新一次的结果，
     /// 用户快速连点缩略图时旧结果自动丢弃，绝不错图。
+    /// 后台全分辨率解码入口（走快速路径：zune-jpeg 优先于 image crate）。
     fn spawn_load(&mut self, path: PathBuf) {
         self.load_gen = self.load_gen.wrapping_add(1);
         let gen = self.load_gen;
@@ -1535,6 +1539,8 @@ impl RetouchApp {
             || self.render_pending
             || self.auto_running
     }
+
+    /// 
 
     /// 统一的图片加载入口：文件对话框与拖拽都走这里，避免重复逻辑。
     /// 加载成功后刷新指标、标记脏、清空后台智能修图状态。
@@ -2067,15 +2073,15 @@ impl RetouchApp {
         if self.tool_mode == ToolMode::Spot {
             ui.group(|ui| {
                 ui.label(egui::RichText::new("污点修复画笔").strong());
-                // 算法档位：传统(Telea) / 自然(频率分离) / 精修(Poisson)。
+                // 算法档位：传统(Telea) / 自然(频率分离) / 精修(Poisson) / 智能(AOT-GAN)。
                 ui.horizontal_wrapped(|ui| {
-                    for (mode, label) in [
-                        (HealMode::Telea, "传统"),
-                        (HealMode::FreqSep, "自然"),
-                        (HealMode::Poisson, "精修"),
+                    for (mode, label, tip) in [
+                        (HealMode::Telea, "传统", "传统 Telea 扩散算法：适合极小污点，速度快"),
+                        (HealMode::FreqSep, "自然", "频率分离融合：保留源块纹理+目标光照，自然无痕"),
+                        (HealMode::Poisson, "精修", "Poisson 梯度域无缝克隆：完全无痕，适合精细修复"),
                     ] {
                         let selected = self.heal_mode == mode;
-                        if ui.selectable_label(selected, label).clicked() {
+                        if ui.selectable_label(selected, label).on_hover_text(tip).clicked() {
                             self.heal_mode = mode;
                             if let Some(s) = &mut self.spot {
                                 s.mode = mode;
@@ -2087,10 +2093,16 @@ impl RetouchApp {
                 });
                 ui.horizontal(|ui| {
                     ui.label("笔刷");
-                    ui.add(egui::Slider::new(&mut self.spot_brush, 2..=50).suffix(" px"));
+                    ui.add(
+                        egui::Slider::new(&mut self.spot_brush, 2..=50)
+                            .suffix(" px")
+                    ).on_hover_text("笔刷大小：鼠标滚轮 或 按 [ 减小 / ] 增大（快捷键 PS 同款）");
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("撤销一笔").clicked() {
+                    if ui.button("撤销一笔")
+                        .on_hover_text("撤销最后标记的一处污点（Cmd+Z）")
+                        .clicked()
+                    {
                         if let Some(s) = &mut self.spot {
                             s.strokes.pop();
                             if s.is_empty() {
@@ -2099,7 +2111,10 @@ impl RetouchApp {
                         }
                         self.dirty_geo = true;
                     }
-                    if ui.button("清空").clicked() {
+                    if ui.button("清空")
+                        .on_hover_text("清除所有污点标记，重新开始")
+                        .clicked()
+                    {
                         self.spot = None;
                         self.dirty_geo = true;
                     }
@@ -2853,8 +2868,7 @@ impl RetouchApp {
                             if let Some(s) = &mut self.spot {
                                 s.add_stroke(cx, cy, r_norm);
                             }
-                            // 单击：立即愈合一次（走轻量 dirty_geo：只重合成几何+污点，
-                            // 不触发整条颜色管线）。拖动：只累积，松手才算（见下方 drag_stopped）。
+                            // 单击：立即愈合一次
                             if clicked {
                                 self.dirty_geo = true;
                             }
@@ -3033,7 +3047,7 @@ impl RetouchApp {
         // 无需反解几何，所见即所得）。与导出 export_image 的施加点完全一致。
         let out_rgb = if let Some(spot) = &self.spot {
             if !spot.is_empty() {
-                // 预览走 preview=true（Poisson 降到 80 迭代，交互流畅）；导出仍满 250。
+                // 预览走 preview=true（Poisson 降到 80 迭代，交互流畅）
                 spot.heal(&out_rgb, true)
             } else {
                 out_rgb
