@@ -2811,6 +2811,15 @@ impl RetouchApp {
         let mut spot_cursor: Option<egui::Pos2> = None;
         let mut spot_brush_px = 0.0f32;
         if self.tool_mode == ToolMode::Spot {
+            // 方括号快捷键调整笔刷大小（PS 同款交互）。
+            ui.ctx().input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::OpenBracket) {
+                    self.spot_brush = self.spot_brush.saturating_sub(2).max(2);
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::CloseBracket) {
+                    self.spot_brush = (self.spot_brush + 2).min(50);
+                }
+            });
             // 拖动开始：记录起点笔画索引，之后累积的笔画画成红点预览（松手才愈合）。
             if resp.drag_started() {
                 self.spot_drag_base = Some(self.spot.as_ref().map_or(0, |s| s.strokes.len()));

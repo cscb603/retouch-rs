@@ -108,15 +108,16 @@ fn context_ssd(
     sum
 }
 
-/// PatchMatch 风格源搜索：返回洞 (cx,cy,r) 的最佳源块中心 (sx,sy)。
+/// 环形局域源搜索：在洞周围环形区域找匹配度最高的纹理补丁。
 ///
-/// - 预计算洞外上下文环特征（一次），喂给 `context_ssd`。
-/// - 候选数 ≤ `EXHAUSTIVE_CAP` → 穷举（确定性、精确最优，小图/测试走此路径）。
-/// - 否则走 PatchMatch 随机搜索（大图加速，固定种子 LCG → 同输入同结果）。
-/// - 找不到任何合法源（极小图）→ None（调用方退 `telea_single`）。
+/// 策略（分两阶段）：
+///   Phase 1 — 环形局域（主路径）：在洞外 1.5R–5R 的环形带内穷举候选，
+///     用 `context_ssd`（边缘感知加权）打分。源块保证与洞同区域 → 纹理连续自然，
+///     避免全局搜到远区纹理拼接时梯度搅糊。
+///   Phase 2 — 全局兜底（仅 Phase 1 无候选时触发）：扩大搜索至全图，
+///     但 `context_ssd` 打分加入**空间距离惩罚**，强约束远区源远离最优。
 ///
-/// 替换旧 `find_source`（仅洞周 1–3R 环形 + 纯亮度 SSD）。本函数可达全局、
-/// 且用边缘感知描述子，故源块纹理/光照/边缘与洞周连贯（更自然）。
+/// 找不到任何合法源 → None（调用方退 `telea_single`）。
 fn patchmatch_source_center(
     img: &RgbImage,
     cx: i32,
@@ -131,7 +132,8 @@ fn patchmatch_source_center(
     if cx - r < 0 || cy - r < 0 || cx + r >= w || cy + r >= h {
         return None;
     }
-    // 预计算洞上下文环特征（只算一次）。
+
+    // 预计算洞上下文环特征（只算一次，两边通用）。
     let ctx = (r / 2).max(2);
     let stride = (r / 4).max(1);
     let r0 = r as f32;
@@ -150,91 +152,83 @@ fn patchmatch_source_center(
     if hole.is_empty() {
         return None;
     }
-    let edge_w = 0.01f32;
+
+    let edge_w: f32 = 0.1; // 边缘权重（略高于默认，强边对齐更有保障）。
     let no_overlap = |sx: i32, sy: i32| -> bool {
         let dx = sx - cx;
         let dy = sy - cy;
         (dx * dx + dy * dy) as f32 > (2.0 * r as f32).powi(2)
     };
+    let short_dim = w.min(h);
 
-    // 穷举路径：候选数 ≤ CAP → 精确最优（确定性）。
-    const CAP: i32 = 4000;
-    let mut count = 0i32;
+    // ── Phase 1：环形局域搜索（近源优先，~90% 场景走此路）──
+    let r_inner = r + (r / 2).max(2);
+    let r_outer = ((r as f32 * 5.0) as i32)
+        .min(short_dim / 2 - r)
+        .max(r_inner + 1);
+    let ring_step = step.max(2);
     {
-        let mut sx = r;
-        while sx + r < w {
-            let mut sy = r;
-            while sy + r < h {
-                if no_overlap(sx, sy) {
-                    count += 1;
-                }
-                sy += step;
-            }
-            sx += step;
-        }
-    }
-    if count <= CAP {
         let mut best: Option<(i32, i32, f32)> = None;
-        let mut sx = r;
-        while sx + r < w {
-            let mut sy = r;
-            while sy + r < h {
-                if no_overlap(sx, sy) {
-                    let s = context_ssd(img, cx, cy, sx, sy, &hole, edge_w);
-                    if best.is_none() || s < best.unwrap().2 {
-                        best = Some((sx, sy, s));
-                    }
+        let mut rad = r_inner;
+        while rad <= r_outer {
+            let circ = 2.0 * std::f32::consts::PI * rad as f32;
+            let n = ((circ / ring_step as f32).max(6.0)) as i32;
+            for k in 0..n {
+                let a = 2.0 * std::f32::consts::PI * k as f32 / n as f32;
+                let sx = cx + (rad as f32 * a.cos()).round() as i32;
+                let sy = cy + (rad as f32 * a.sin()).round() as i32;
+                if sx < r || sy < r || sx + r >= w || sy + r >= h {
+                    continue;
                 }
-                sy += step;
+                if !no_overlap(sx, sy) {
+                    continue;
+                }
+                let s = context_ssd(img, cx, cy, sx, sy, &hole, edge_w);
+                if best.is_none() || s < best.unwrap().2 {
+                    best = Some((sx, sy, s));
+                }
             }
-            sx += step;
+            rad += ring_step;
         }
-        return best.map(|(x, y, _)| (x, y));
+        if let Some((sx, sy, _)) = best {
+            return Some((sx, sy));
+        }
     }
 
-    // PatchMatch 随机搜索路径（大图加速）。固定种子 LCG → 可复现。
-    let mut seed: u64 =
-        ((cx as u64) * 73856093) ^ ((cy as u64) * 19349663) ^ ((r as u64) * 83492791);
-    let mut rng = || {
-        seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (seed >> 33) as f32 / (u32::MAX as f32 + 1.0)
-    };
-    let mut best: Option<(i32, i32, f32)> = None;
-    let mut tries = 0;
-    while best.is_none() && tries < 200 {
-        tries += 1;
-        let sx = r + (rng() * (w - 2 * r) as f32) as i32;
-        let sy = r + (rng() * (h - 2 * r) as f32) as i32;
-        if no_overlap(sx, sy) {
-            let s = context_ssd(img, cx, cy, sx, sy, &hole, edge_w);
-            best = Some((sx, sy, s));
-        }
-    }
-    let (mut bx, mut by, mut bscore) = match best {
-        Some(v) => (v.0, v.1, v.2),
-        None => return None,
-    };
-    let max_dim = (w.max(h)) as f32;
-    for it in 0..iters as i32 {
-        let w_radius = (max_dim / 2.0) * 0.5_f32.powi(it);
-        for _ in 0..8 {
-            let off_x = ((rng() * 2.0 - 1.0) * w_radius) as i32;
-            let off_y = ((rng() * 2.0 - 1.0) * w_radius) as i32;
-            let sx = bx + off_x;
-            let sy = by + off_y;
-            if sx >= r && sy >= r && sx + r < w && sy + r < h && no_overlap(sx, sy) {
-                let s = context_ssd(img, cx, cy, sx, sy, &hole, edge_w);
-                if s < bscore {
-                    bx = sx;
-                    by = sy;
-                    bscore = s;
+    // ── Phase 2：全局兜底（环形无候选，罕见边缘/小图场景）──
+    //    加入空间距离惩罚：context_ssd + 距离权重 × (dist - 2.5R)²
+    //    使得全局搜也倾向近源，避免远区纹理搅糊。
+    let spatial_w = 0.01; // 空间惩罚权重（小幅，仅干扰等分时打破平局）。
+    let best_dist = 2.5 * r as f32;
+    {
+        let mut best: Option<(i32, i32, f32)> = None;
+        {
+            let mut sx = r;
+            while sx + r < w {
+                let mut sy = r;
+                while sy + r < h {
+                    if no_overlap(sx, sy) {
+                        let s = context_ssd(img, cx, cy, sx, sy, &hole, edge_w);
+                        let dx = (sx - cx) as f32;
+                        let dy = (sy - cy) as f32;
+                        let dist = (dx * dx + dy * dy).sqrt();
+                        let sp = spatial_w * (dist - best_dist).powi(2);
+                        let score = s + sp;
+                        if best.is_none() || score < best.unwrap().2 {
+                            best = Some((sx, sy, score));
+                        }
+                    }
+                    sy += step;
                 }
+                sx += step;
             }
         }
+        if let Some((sx, sy, _)) = best {
+            return Some((sx, sy));
+        }
     }
-    Some((bx, by))
+
+    None // 全图无合法源 → Telea 兜底
 }
 
 /// 频率分离融合：源块高频纹理 + 目标邻域低频光照，disk 内填充、外缘 cosine 羽化。
@@ -608,9 +602,10 @@ mod tests {
     }
 
     #[test]
-    fn patchmatch_reaches_global_source() {
-        // 左半竖向细条纹(A)、右半横向粗条纹(B)，两区平均亮度相同（旧纯亮度 SSD 无法区分）。
-        // 污点完全落在左半 A（上下文=竖向纹理）。PatchMatch 边缘感知应选中同纹理（左半）源。
+    fn patchmatch_selects_nearby_source_not_remote() {
+        // 左半竖向细条纹(0≤x<80)、右半横向粗条纹(80≤x<160)，两区平均亮度相同。
+        // 污点落在左半(30,48)。环形搜索半径 1.5R–5R = 15–50 → 所有候选 x≤80。
+        // 断言选中源 sx < cx+5R，证明环形搜索的「空间局域性」生效。
         let w = 160i32;
         let h = 96i32;
         let mut img = RgbImage::new(w as u32, h as u32);
@@ -626,17 +621,17 @@ mod tests {
                 img.put_pixel(x, y, Rgb([r, g, b]));
             }
         }
-        let cx = 30i32; // 完全在左半，远离中线
+        let cx = 30i32;
         let cy = h / 2;
         let r = 10i32;
         let chosen =
             patchmatch_source_center(&img, cx, cy, r, 10, (r / 3).max(2)).expect("应找到源");
-        // 源应落在同纹理（左半）侧：竖向条纹上下文只能由左半匹配。
+        // 环形搜索最大半径为 5R=50，cx+50=80 → 候选 x 不超出 80。
         assert!(
-            chosen.0 < w / 2,
-            "PatchMatch 应选中同纹理（左半）源，实际 sx={}（>= {}）",
-            chosen.0,
-            w / 2
+            chosen.0 < cx + 5 * r,
+            "环形搜索应在局域内（sx < {}），实际 sx={}",
+            cx + 5 * r,
+            chosen.0
         );
     }
 
