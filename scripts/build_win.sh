@@ -20,7 +20,11 @@ OUT_DIR="target/$TARGET/release/pack"
 echo "==> 1/4 交叉编译 Windows release ($TARGET)"
 # 交叉编译时让 winresource 用 brew 的 llvm-rc 生成 MSVC 兼容的资源(.res)
 export RC="/opt/homebrew/opt/llvm/bin/llvm-rc"
-cargo xwin build --release --target "$TARGET"
+# RUSTC_WRAPPER= SDKROOT= ：避免全局 sccache 把 macOS SDKROOT 误传给 clang-cl，
+#                          导致含 C 代码的 crate(ring) 交叉编译失败（隐蔽坑，改 rustflags 触发全量重编才爆）
+# -p retouch-ui --no-default-features ：只编 GUI 包且排除 qwen(retouch-agent→ureq→ring)，
+#                          否则 workspace 会连带编译 retouch-agent，触发 ring 交叉编译失败
+RUSTC_WRAPPER= SDKROOT= cargo xwin build --release --target "$TARGET" -p retouch-ui --no-default-features
 
 echo "==> 2/4 组装打包目录"
 rm -rf "$OUT_DIR"

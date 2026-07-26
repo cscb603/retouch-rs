@@ -8,11 +8,12 @@ name = "retouch-rs-gui"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["qwen"]
+qwen = ["retouch-agent"]
 
 [dependencies]
 retouch-core = { path = "../../crates/retouch-core" }
-retouch-agent = { path = "../../crates/retouch-agent" }
+retouch-agent = { path = "../../crates/retouch-agent", optional = true }
 egui = "0.29"
 eframe = { version = "0.29", features = ["glow"] }
 rfd = "0.15"

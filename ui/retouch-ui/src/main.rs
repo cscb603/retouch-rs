@@ -14,6 +14,7 @@
 use eframe::egui;
 use image::GenericImageView;
 use palette::{IntoColor, LinSrgb, Oklab};
+#[cfg(feature = "qwen")]
 use retouch_agent::{thumb_b64, QwenClient};
 use retouch_core::analyze::{analyze, ImageMetrics};
 use retouch_core::auto::{run_auto, AutoResult};
@@ -413,7 +414,12 @@ impl RetouchApp {
             match_strength: 0.8,
             title_result: Arc::new(Mutex::new(None)),
             last_title: None,
-            api_qwen_key: Self::load_qwen_key(),
+            api_qwen_key: {
+                #[cfg(feature = "qwen")]
+                { Self::load_qwen_key() }
+                #[cfg(not(feature = "qwen"))]
+                { String::new() }
+            },
             qwen_open: false,
             render_tx,
             render_rx: result_rx,
@@ -778,6 +784,7 @@ impl RetouchApp {
 
     /// 生成作品名（可选联网，仅 Qwen 视觉）：为当前图起名 + 点评。
     /// 不点则不联网、零 token。
+    #[cfg(feature = "qwen")]
     fn generate_title(&mut self) {
         if self.src_path.is_none() {
             self.status = "请先打开图片".into();
@@ -837,6 +844,7 @@ impl RetouchApp {
     }
 
     /// 每帧检查作品名异步结果，落到 last_title 与状态栏。
+    #[cfg(feature = "qwen")]
     fn poll_title(&mut self) {
         let got = {
             let guard = self.title_result.lock();
@@ -1912,9 +1920,8 @@ impl RetouchApp {
         }
     }
 
-    /// 带细线框的折叠分组，把左侧参数列表变成商业软件风格的设置面板。
-    /// 每个分组一个浅色底 + 0.5px 边框的卡片，标题用 CollapsingHeader。
     /// Qwen(DashScope) Key 本地记忆：写入 `~/.retouch/qwen_key`，免每次输入。
+    #[cfg(feature = "qwen")]
     fn qwen_key_path() -> std::path::PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         let mut p = std::path::PathBuf::from(home);
@@ -1922,17 +1929,20 @@ impl RetouchApp {
         p.push("qwen_key");
         p
     }
+    #[cfg(feature = "qwen")]
     fn load_qwen_key() -> String {
         std::fs::read_to_string(Self::qwen_key_path())
             .map(|s| s.trim().to_string())
             .unwrap_or_default()
     }
+    #[cfg(feature = "qwen")]
     fn save_qwen_key(key: &str) {
         if let Some(parent) = Self::qwen_key_path().parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(Self::qwen_key_path(), key.trim());
     }
+    #[cfg(feature = "qwen")]
     fn forget_qwen_key() {
         let _ = std::fs::remove_file(Self::qwen_key_path());
     }
@@ -2641,8 +2651,8 @@ impl RetouchApp {
         });
 
         // 作品名设置（可选联网）：仅「生成作品名」用 Qwen 视觉；不点则不联网、零 token。
-        // 默认折叠：Key 已本地记住，无需每次展开；点标题可展开编辑/清除。
-        // 用局部变量承接展开状态，避免 &mut self.qwen_open 与闭包内 &mut self 冲突。
+        #[cfg(feature = "qwen")]
+        {
         let mut qopen = self.qwen_open;
         Self::collapsing_section_state(
             "作品名设置（可选 · 已记忆 Key）",
@@ -2690,16 +2700,14 @@ impl RetouchApp {
                 });
                 if let Some(t) = &self.last_title {
                     ui.separator();
-                    // 标题：大号粗体
                     let title = if let Some(s) = t.find('》') {
-                        &t[..s + 3] // "《春日》" 部分
+                        &t[..s + 3]
                     } else {
                         &t[..]
                     };
                     ui.add(egui::Label::new(
                         egui::RichText::new(title).size(15.0).strong(),
                     ));
-                    // 点评内容：如有则在可滚动区域显示
                     let review = if let Some(s) = t.find('—') {
                         &t[s + 2..]
                     } else if let Some(s) = t.find('》') {
@@ -2724,6 +2732,7 @@ impl RetouchApp {
             },
         );
         self.qwen_open = qopen;
+        }
 
         // 一键智能：纯算法闭环，后台线程跑，不卡 UI。
         Self::collapsing_section("一键智能", force_open, ui, |ui| {
@@ -3439,6 +3448,7 @@ impl RetouchApp {
                     if Self::toolbar_btn(ui, "保存图", "导出/保存图片 (Cmd+S)") {
                         self.save();
                     }
+                    #[cfg(feature = "qwen")]
                     if Self::toolbar_btn(ui, "作品名", "Qwen 视觉生成作品名（默认不联网）")
                     {
                         self.generate_title();
@@ -3602,6 +3612,7 @@ impl RetouchApp {
         // 每帧轮询后台智能修图结果；完成时把采用参数套用到当前 adj 并触发重绘。
         self.poll_auto();
         // 每帧检查「生成作品名」异步结果，落到状态栏。
+        #[cfg(feature = "qwen")]
         self.poll_title();
         // v0.6.3：轮询后台导入 / 切图解码 / 批量导出，界面全程不冻结。
         self.poll_import();

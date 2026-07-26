@@ -34,3 +34,6 @@ Thumbs.db
 # 嵌套的独立子项目（各自有仓库，不属于 retouch-rs，不应进本仓库）
 ImageColorProfiler/
 fast-video-compress/
+
+# 打包产物（大体积二进制/zip，仅本地分发用，不进仓库）
+dist/

@@ -14,7 +14,7 @@ FONT="ui/retouch-ui/assets/fonts/NotoSansSC-VF.ttf"
 ICON="ui/retouch-ui/assets/AppIcon.icns"
 OUTPUT_DIR="dist"
 
-VERSION=$(grep '^version' Cargo.toml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/' || echo "0.7.0")
+VERSION=$(grep '^version' ui/retouch-ui/Cargo.toml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/' || echo "0.6.4")
 
 echo "📦 打包 $APP_NAME v$VERSION"
 
