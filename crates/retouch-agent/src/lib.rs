@@ -56,16 +56,6 @@ impl QwenClient {
             ],
             "max_tokens": 600
         });
-        // ===== 代理探测：Finder 双击启动的 GUI 不继承终端 env，故先看进程 env；
-        // 若用户在「作品名设置」手动填了代理，应用启动时会写进进程 env，这里也能读到。
-        // 命中则显式接给 ureq；都没有则直连。=====
-        let proxy = detect_proxy();
-        if let Some(p) = &proxy {
-            eprintln!("[qwen] proxy: {}", p);
-        } else {
-            eprintln!("[qwen] proxy: (none, direct)");
-        }
-
         // ===== 追踪日志（排障用，不影响逻辑）=====
         let klen = self.api_key.trim().len();
         let kmask = if klen == 0 {
@@ -83,38 +73,108 @@ impl QwenClient {
             metrics_json.len(),
             process_summary.len()
         );
-        eprintln!("[qwen] -> POST https (ureq), timeout=25s");
+
+        // ===== 智能选路（借鉴 arlink2 netprobe：先探测、再选路、失败换路）=====
+        // 1. TCP 预探测直连 dashscope:443 与代理端口是否存活（各 ~2s 超时）；
+        // 2. 按存活情况排出尝试顺序：直连通→直连优先；直连不通且代理活→代理优先；
+        //    代理配置了但端口死（如 VPN 已关）→ 自动忽略，不撞死在死代理上；
+        // 3. 第一条路失败自动换第二条重试。DashScope 是国内服务，无 VPN 直连即通。
+        let proxy = detect_proxy().filter(|p| {
+            let alive = probe_proxy_alive(p);
+            if !alive {
+                eprintln!("[qwen] 代理 {} 端口无响应（VPN 已关？），忽略之", p);
+            }
+            alive
+        });
+        let direct_ok = probe_tcp("dashscope.aliyuncs.com:443", 2500);
+        eprintln!(
+            "[qwen] 选路探测: 直连={} 代理={}",
+            if direct_ok { "通" } else { "不通" },
+            proxy.as_deref().unwrap_or("(无)")
+        );
+        let mut routes: Vec<Option<String>> = Vec::new();
+        if direct_ok {
+            routes.push(None); // 直连优先
+            if let Some(p) = &proxy {
+                routes.push(Some(p.clone()));
+            }
+        } else {
+            if let Some(p) = &proxy {
+                routes.push(Some(p.clone())); // 代理优先
+            }
+            routes.push(None); // 直连兜底（探测可能误判）
+        }
+
+        let mut last_err = String::new();
+        let mut v: Option<Value> = None;
+        for route in &routes {
+            let tag = route.as_deref().unwrap_or("直连");
+            eprintln!("[qwen] -> POST via {} (timeout=25s)", tag);
+            match self.post_once(&body, route.as_deref()) {
+                Ok(val) => {
+                    v = Some(val);
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("[qwen] via {} 失败: {}", tag, e);
+                    last_err = e;
+                }
+            }
+        }
+        let v = v.ok_or_else(|| format!("Qwen 请求失败（已尝试全部线路）: {}", last_err))?;
+        let text = v["choices"][0]["message"]["content"].as_str().unwrap_or("{}");
+        let obj: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+        Ok(obj)
+    }
+
+    /// 用指定线路发一次请求（`proxy=None` 直连）。
+    fn post_once(&self, body: &Value, proxy: Option<&str>) -> Result<Value, String> {
         let mut builder = ureq::builder().timeout(std::time::Duration::from_secs(25));
         // 手动接 native-tls：ureq 2.12 的 native-tls feature 不会自动接线，
         // 尤其走代理的 HTTPS CONNECT 隧道必须显式提供 TLS 连接器，否则报 no TLS backend。
-        match native_tls::TlsConnector::new() {
-            Ok(tls) => builder = builder.tls_connector(std::sync::Arc::new(tls)),
-            Err(e) => eprintln!("[qwen] TLS 初始化失败: {}", e),
-        }
-        if let Some(p) = &proxy {
-            match ureq::Proxy::new(p) {
-                Ok(proxy_obj) => builder = builder.proxy(proxy_obj),
-                Err(e) => eprintln!("[qwen] proxy 初始化失败({})，退回直连", e),
-            }
+        let tls = native_tls::TlsConnector::new().map_err(|e| format!("TLS 初始化失败: {}", e))?;
+        builder = builder.tls_connector(std::sync::Arc::new(tls));
+        if let Some(p) = proxy {
+            let proxy_obj = ureq::Proxy::new(p).map_err(|e| format!("代理地址无效: {}", e))?;
+            builder = builder.proxy(proxy_obj);
         }
         let agent = builder.build();
         let resp = agent
             .post(QWEN_URL)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .set("Content-Type", "application/json")
-            .send_json(body);
+            .send_json(body.clone());
         match &resp {
             Ok(r) => eprintln!("[qwen] <- HTTP status={}", r.status()),
             Err(e) => eprintln!("[qwen] <- HTTP ERROR: {:?}", e),
         }
-        let resp = resp.map_err(|e| format!("Qwen 请求失败: {}", e))?;
-        let v: Value = resp
-            .into_json()
-            .map_err(|e| format!("Qwen 响应解析失败: {}", e))?;
-        let text = v["choices"][0]["message"]["content"].as_str().unwrap_or("{}");
-        let obj: Value = serde_json::from_str(text).unwrap_or(Value::Null);
-        Ok(obj)
+        let resp = resp.map_err(|e| format!("请求失败: {}", e))?;
+        resp.into_json().map_err(|e| format!("响应解析失败: {}", e))
     }
+}
+
+/// TCP 预探测：`addr` 形如 `host:port`，在 `timeout_ms` 内能建立连接即视为通。
+fn probe_tcp(addr: &str, timeout_ms: u64) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let Ok(mut addrs) = addr.to_socket_addrs() else {
+        return false; // DNS 解析失败（离线/被劫持）
+    };
+    addrs.any(|sa| TcpStream::connect_timeout(&sa, timeout).is_ok())
+}
+
+/// 探测代理端口是否存活（解析 `http://host:port` 后 TCP 连接）。
+fn probe_proxy_alive(proxy_url: &str) -> bool {
+    let hostport = proxy_url
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_start_matches("socks5://")
+        .trim_end_matches('/');
+    if hostport.is_empty() {
+        return false;
+    }
+    probe_tcp(hostport, 1500)
 }
 
 /// 探测 HTTPS 代理地址（返回 None 表示直连）。
