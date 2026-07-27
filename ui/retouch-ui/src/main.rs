@@ -115,6 +115,10 @@ struct RetouchApp {
     /// 生成作品名（Qwen 视觉，可选）的异步结果通道 + 最近一次结果。
     title_result: Arc<Mutex<Option<String>>>,
     last_title: Option<String>,
+    /// 生成作品名失败信息：后台线程失败时写入，UI 轮询显示并复位「正在生成」状态，避免死卡。
+    title_error: Arc<Mutex<Option<String>>>,
+    /// 生成开始时刻：UI 侧超时兜底（请求挂起如 VPN 重连 DNS 卡住时，最多等阈值必给反馈）。
+    title_started_at: Option<std::time::Instant>,
     /// 已同步到窗口标题栏的作品名（仅变化时发送 ViewportCommand，避免每帧刷）。
     #[cfg(feature = "qwen")]
     applied_title: Option<String>,
@@ -419,6 +423,8 @@ impl RetouchApp {
             match_strength: 0.8,
             title_result: Arc::new(Mutex::new(None)),
             last_title: None,
+            title_error: Arc::new(Mutex::new(None)),
+            title_started_at: None,
             #[cfg(feature = "qwen")]
             applied_title: None,
             api_qwen_key: {
@@ -813,12 +819,17 @@ impl RetouchApp {
         let metrics = self.img_metrics.clone();
         let summary = "中性校正 + 影调优化".to_string();
         let out = Arc::clone(&self.title_result);
+        let err_out = Arc::clone(&self.title_error);
+        self.title_started_at = Some(std::time::Instant::now());
         self.status = "正在生成作品名（Qwen 视觉）…".into();
         std::thread::spawn(move || {
             let b64 = match thumb_b64(&path, 512) {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("作品名缩略图失败: {}", e);
+                    if let Ok(mut g) = err_out.lock() {
+                        *g = Some(format!("图片读取失败: {}", e));
+                    }
                     return;
                 }
             };
@@ -846,7 +857,12 @@ impl RetouchApp {
                         *g = Some(text);
                     }
                 }
-                Err(e) => eprintln!("Qwen 作品名失败: {}", e),
+                Err(e) => {
+                    eprintln!("Qwen 作品名失败: {}", e);
+                    if let Ok(mut g) = err_out.lock() {
+                        *g = Some(format!("Qwen 请求失败: {}", e));
+                    }
+                }
             }
         });
     }
@@ -854,6 +870,29 @@ impl RetouchApp {
     /// 每帧检查作品名异步结果，落到 last_title 与状态栏。
     #[cfg(feature = "qwen")]
     fn poll_title(&mut self) {
+        // 失败优先：后台线程写入错误则立即显示并复位「正在生成」状态（修复死卡）。
+        {
+            let guard = self.title_error.lock();
+            let err = match guard {
+                Ok(mut g) => g.take(),
+                Err(e) => e.into_inner().take(),
+            };
+            if let Some(e) = err {
+                self.status = format!("生成失败：{}（检查网络/Key 后重试）", e);
+                self.title_started_at = None;
+                return;
+            }
+        }
+        // UI 侧超时兜底：请求挂起（如 VPN 重连 DNS 卡住，ureq timeout 未覆盖）时，
+        // 最多等 30s 必给反馈，避免永久卡在「正在生成」。
+        if let Some(start) = self.title_started_at {
+            if start.elapsed().as_secs() >= 30 {
+                self.status = "生成超时：疑似网络/VPN 中断，恢复后重试".into();
+                self.title_started_at = None;
+                return;
+            }
+        }
+        // 成功结果
         let got = {
             let guard = self.title_result.lock();
             match guard {
@@ -870,6 +909,7 @@ impl RetouchApp {
             };
             self.status = short;
             self.last_title = Some(t);
+            self.title_started_at = None;
         }
     }
 
