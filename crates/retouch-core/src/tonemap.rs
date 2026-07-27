@@ -177,13 +177,20 @@ pub fn tonal_adjustments(
     // 低调：仅极轻找回暗部（shadow_lift），median 守住低调区间（≤0.46），**不整体提亮**，
     //       保夜景/逆光的暗氛围（用户铁律：低调类保护高光阴影、胶片衰变，不硬提亮）；
     // 中调：平衡到 ~0.50；高调：允许上探（乳白），封顶 0.66 防旧版过曝。
-    let target_med: f32 = match t.key {
-        Key::Low => (base.tone.median_l + 0.03).min(0.46),
-        Key::Mid => 0.50,
-        Key::High => (base.tone.median_l + 0.04).min(0.66),
-    };
     // exposure_ev 把中位数拉向目标（实测：中位数约 0.10 median_l / EV）
-    let exposure_ev = ((target_med - base.tone.median_l) / 0.10).clamp(-2.0, 2.0);
+    // 护栏：异常图（全黑/全白/退化）可能让 analyze 给出 NaN/Inf 的 median_l，
+    // 不夹住会算成 NaN 污染整图。先落回合法区间再算。
+    let median_l = if base.tone.median_l.is_finite() {
+        base.tone.median_l
+    } else {
+        0.5
+    };
+    let target_med: f32 = match t.key {
+        Key::Low => (median_l + 0.03).min(0.46),
+        Key::Mid => 0.50,
+        Key::High => (median_l + 0.04).min(0.66),
+    };
+    let exposure_ev = ((target_med - median_l) / 0.10).clamp(-2.0, 2.0);
 
     // —— 对比/光比/暗部：按调性 + 基调 ——
     // 低调：绝不整体提亮；只靠 shadow_lift/deep_shadow_lift 找回暗部细节 +
@@ -240,7 +247,10 @@ pub fn tonal_adjustments(
         geometry: Geometry::default(),
         detail: Detail::default(),
         advanced: Advanced::default(),
-        color_plan: None,
+        // 色彩引擎产物（场景规则 + 记忆色 + 数码偏色补偿）随影调引擎一起下发，
+        // 否则 pipeline 不会逐像素套用色彩引擎——这正是「一键智能」有、「自动中性化」
+        // 没有的色彩智能差异。ColorPlan 由 auto_neutral_balance 内部已算好（强度 0.8）。
+        color_plan: bal.color_plan,
         mix: 0.9,
     }
 }

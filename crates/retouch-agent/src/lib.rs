@@ -57,6 +57,7 @@ impl QwenClient {
             "max_tokens": 600
         });
         let resp = ureq::post(QWEN_URL)
+            .timeout(std::time::Duration::from_secs(25))
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .set("Content-Type", "application/json")
             .send_json(body)

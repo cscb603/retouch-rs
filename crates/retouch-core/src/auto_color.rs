@@ -64,7 +64,10 @@ impl AutoBalance {
         }
         Adjustments {
             exposure_ev: self.exposure_ev,
-            tone_map: ToneMapMode::Agx,
+            // 永不再默认套 AgX：AgX 是显示变换，无条件把中间调压亮、压反差、去饱和，
+            // 正是「自动中性化偏亮低对比」的根。前端已改走 tonal_adjustments（tone_map=None），
+            // 此 to_adjustments() 仅 example/诊断用，保持 identity 避免重现旧病。
+            tone_map: ToneMapMode::None,
             defake: DefakeColor::on(),
             grade,
             white_balance: self.wb,

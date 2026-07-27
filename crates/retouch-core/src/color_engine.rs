@@ -211,10 +211,13 @@ pub fn analyze_color(img: &DynamicImage, m: &ImageMetrics) -> ColorMetrics {
             cast_n += 1;
         }
 
-        // 色相统计（circular mean using sin/cos）
-        let h_r = h.to_radians();
-        h_sin += h_r.sin() as f64;
-        h_cos += h_r.cos() as f64;
+        // 色相统计（circular mean using sin/cos）。
+        // 近消色差像素（c≈0）的 hue 无意义，不计入平均色相，避免污染圆均值。
+        if c > 0.01 {
+            let h_r = h.to_radians();
+            h_sin += h_r.sin() as f64;
+            h_cos += h_r.cos() as f64;
+        }
 
         // 天空检测：hue 210-255°, chroma 0.02-0.14, L > 0.35
         if h >= 210.0 && h <= 255.0 && c > 0.02 && c < 0.14 && l > 0.35 {

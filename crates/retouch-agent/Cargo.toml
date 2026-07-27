@@ -8,7 +8,8 @@ retouch-core = { path = "../retouch-core" }
 serde_json = "1"
 image = "0.25"
 # LLM API access (DeepSeek text decision + Qwen vision review).
-# On macOS the default `tls` (native-tls) uses the system Security framework,
-# so no OpenSSL toolchain is required. `json` enables Response::into_json.
-ureq = { version = "2.9", features = ["json"] }
+# 用 native-tls（macOS=SecureTransport / Windows=Schannel / Linux=OpenSSL），
+# 刻意关掉 default-features 以剔除默认的 rustls→ring——ring 无法在 macOS 上
+# 交叉编译到 Windows（需 perl/asm），会导致 Win 版带不上 qwen。native-tls 无此问题。
+ureq = { version = "2.9", default-features = false, features = ["json", "native-tls"] }
 base64 = "0.22"

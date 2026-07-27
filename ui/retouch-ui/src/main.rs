@@ -18,7 +18,7 @@ use palette::{IntoColor, LinSrgb, Oklab};
 use retouch_agent::{thumb_b64, QwenClient};
 use retouch_core::analyze::{analyze, ImageMetrics};
 use retouch_core::auto::{run_auto, AutoResult};
-use retouch_core::auto_color::{auto_neutral_balance, film_presets};
+use retouch_core::auto_color::film_presets;
 use retouch_core::geometry::{apply_geometry, Geometry};
 use retouch_core::params::{registry, Field, ParamSpec};
 use retouch_core::pipeline::{
@@ -115,6 +115,9 @@ struct RetouchApp {
     /// 生成作品名（Qwen 视觉，可选）的异步结果通道 + 最近一次结果。
     title_result: Arc<Mutex<Option<String>>>,
     last_title: Option<String>,
+    /// 已同步到窗口标题栏的作品名（仅变化时发送 ViewportCommand，避免每帧刷）。
+    #[cfg(feature = "qwen")]
+    applied_title: Option<String>,
     /// Qwen(DashScope) Key，仅用于「生成作品名」；填一次后写入本地文件记住，免重复输入。
     api_qwen_key: String,
     /// 作品名设置面板是否展开（默认折叠；记住 key 后无需每次展开）。
@@ -159,6 +162,8 @@ struct RetouchApp {
     theme_mode: ThemeMode,
     /// 当前显示的小技巧
     current_tip: &'static str,
+    /// 小技巧自动轮换的目标时刻（ctx 时钟，秒）；<=0 表示尚未初始化
+    next_tip_at: f64,
     /// 相册（v0.6 轻量 Lightroom 化）：多图批处理，活跃索引见 album.active_idx。
     album: Album,
     /// 工具模式：调色 / 污点修复画笔。
@@ -414,6 +419,8 @@ impl RetouchApp {
             match_strength: 0.8,
             title_result: Arc::new(Mutex::new(None)),
             last_title: None,
+            #[cfg(feature = "qwen")]
+            applied_title: None,
             api_qwen_key: {
                 #[cfg(feature = "qwen")]
                 { Self::load_qwen_key() }
@@ -442,6 +449,7 @@ impl RetouchApp {
             dirty_geo: false,
             theme_mode: ThemeMode::Auto,
             current_tip: tips::random_tip(),
+            next_tip_at: 0.0,
             album: Album::new(),
             tool_mode: ToolMode::Adjust,
             spot_drag_base: None,
@@ -878,6 +886,11 @@ impl RetouchApp {
             let t = spec.field.get(target);
             spec.field.set(&mut a, b + (t - b) * s);
         }
+        // color_plan（色彩引擎产物：场景规则/记忆色/数码偏色补偿）不在注册表里、
+        // 不会被上面 blend，这里显式延续：target 优先（如一键中性的最新结果），
+        // 缺则取 base（如「引擎预设」blend 时 base=影调引擎结果）。
+        // 否则 engine_based 预设会把引擎算好的色彩智能丢掉，变成只套影调。
+        a.color_plan = target.color_plan.clone().or(base.color_plan.clone());
         a
     }
 
@@ -1923,7 +1936,11 @@ impl RetouchApp {
     /// Qwen(DashScope) Key 本地记忆：写入 `~/.retouch/qwen_key`，免每次输入。
     #[cfg(feature = "qwen")]
     fn qwen_key_path() -> std::path::PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        // 跨平台家目录：macOS/Linux 用 HOME，Windows 用 USERPROFILE；
+        // 都不存在才回退到当前目录（理论上不会走到）。
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
         let mut p = std::path::PathBuf::from(home);
         p.push(".retouch");
         p.push("qwen_key");
@@ -2084,17 +2101,22 @@ impl RetouchApp {
             ui.group(|ui| {
                 ui.label(egui::RichText::new("污点修复画笔").strong());
                 // 算法档位：传统(Telea) / 自然(频率分离) / 精修(Poisson) / 智能(AOT-GAN)。
-                ui.horizontal_wrapped(|ui| {
-                    for (mode, label, tip) in [
+                ui.columns(3, |cols| {
+                    let items = [
                         (HealMode::Telea, "传统", "传统 Telea 扩散算法：适合极小污点，速度快"),
                         (HealMode::FreqSep, "自然", "频率分离融合：保留源块纹理+目标光照，自然无痕"),
                         (HealMode::Poisson, "精修", "Poisson 梯度域无缝克隆：完全无痕，适合精细修复"),
-                    ] {
-                        let selected = self.heal_mode == mode;
-                        if ui.selectable_label(selected, label).on_hover_text(tip).clicked() {
-                            self.heal_mode = mode;
+                    ];
+                    for (i, (mode, label, tip)) in items.iter().enumerate() {
+                        let selected = self.heal_mode == *mode;
+                        if cols[i]
+                            .selectable_label(selected, *label)
+                            .on_hover_text(*tip)
+                            .clicked()
+                        {
+                            self.heal_mode = *mode;
                             if let Some(s) = &mut self.spot {
-                                s.mode = mode;
+                                s.mode = *mode;
                             }
                             // 换档只需重合成（几何+污点），不必重跑颜色管线。
                             self.dirty_geo = true;
@@ -2150,9 +2172,17 @@ impl RetouchApp {
                 .clicked()
             {
                 if let Some(src) = &self.src {
-                    let bal = auto_neutral_balance(src, self.smart_compensation);
-                    self.status = bal.summary.clone();
-                    self.replace_adj_preserve_geo(bal.to_adjustments());
+                    let m = analyze(src);
+                    let t = retouch_core::tonemap::classify_tonality(&m);
+                    let adj = tonal_adjustments(src, self.smart_compensation, self.neutral_strength);
+                    self.status = format!(
+                        "自动中性化 · {}：色温 {:.2} / 色调 {:.2}，智能补偿{}",
+                        t.label,
+                        adj.white_balance.temp,
+                        adj.white_balance.tint,
+                        if self.smart_compensation { "启用" } else { "关闭" }
+                    );
+                    self.replace_adj_preserve_geo(adj);
                     // 存亮度基线供「还原亮度」滑块使用
                     self.auto_baseline = Some(self.adj.clone());
                     self.exposure_restore = 0.0;
@@ -2167,7 +2197,7 @@ impl RetouchApp {
                      对色彩浓度与光比做微量补偿，避免校正后变淡变平。",
                 );
         });
-        // 曝光还原滑块：自动中性化以后颜色好看但曝光偏亮，拖此滑块回退亮度保留颜色。
+        // 曝光还原滑块：影调引擎已自动平衡亮度，若仍觉过亮可手动回退亮度保留颜色。
         if self.auto_baseline.is_some() {
             ui.horizontal(|ui| {
                 ui.label("还原亮度");
@@ -2181,52 +2211,232 @@ impl RetouchApp {
         }
         ui.separator();
 
-        // ═══ 智能美肤 A（v0.6，零模型）═══
-        Self::collapsing_section("智能美肤", force_open, ui, |ui| {
-            ui.label("一键粉嫩肤色 + 温和频谱磨皮（纯算法，零 AI）。");
-            ui.horizontal(|ui| {
-                ui.label("强度");
-                ui.add(egui::Slider::new(&mut self.beauty_strength, 0.0..=1.0).suffix("%"));
-            });
-            if ui.button("一键美肤").clicked() {
-                self.apply_smart_beauty(self.beauty_strength);
-            }
-        });
         ui.separator();
 
-        // 图像分析：把原图量化成 OKLCH 指标，让用户"看见"影调/色偏/肤色。
-        Self::collapsing_section("图像分析", force_open, ui, |ui| {
-            if let Some(m) = &self.img_metrics {
-                ui.label(format!(
-                    "亮度 均值 {:.2}  反差 {:.2}  范围 {:.2}",
-                    m.tone.mean_l, m.tone.std_l, m.dynamic_range
-                ));
-                ui.label(format!(
-                    "色彩 平均彩度 {:.3}  主色相 {:.0}°  集中度 {:.2}",
-                    m.color.mean_c, m.color.mean_h_deg, m.color.hue_peakiness
-                ));
-                ui.label(format!(
-                    "削波 高光 {:.2}%  暗部 {:.2}%",
-                    m.exposure.highlight_clip_pct, m.exposure.shadow_clip_pct
-                ));
-                ui.label(format!(
-                    "色域外 {:.2}%  色偏强度 {:.3}",
-                    m.gamut.clip_pct, m.cast.chroma
-                ));
-                if m.skin.ratio > 0.03 {
-                    ui.label(format!(
-                        "肤色 占比 {:.1}%  彩度 {:.3}  色相 {:.0}°",
-                        m.skin.ratio * 100.0,
-                        m.skin.mean_c,
-                        m.skin.mean_h_deg
-                    ));
-                } else {
-                    ui.label("肤色 未检出");
-                }
-            } else {
-                ui.label("打开图片后显示量化指标");
+        // ═══ 分类：基础校正 ═══
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("基础校正").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.separator();
+
+        // 曝光 / 影调
+        Self::collapsing_section("曝光 / 影调", force_open, ui, |ui| {
+            changed |= self.param_slider(ui, Field::ExposureEv);
+            let old_mode = self.adj.tone_map;
+            let mut mode = match old_mode {
+                ToneMapMode::None => 0,
+                ToneMapMode::Agx => 1,
+                ToneMapMode::Filmic => 2,
+            };
+            ui.horizontal(|ui| {
+                ui.label("影调映射").on_hover_text(
+                    "决定超过屏幕亮度范围的高光/暗部如何被压缩回 SDR。\n\
+                     常见术语解释：\n\
+                     • 肩部 Shoulder：高光区域被压弯下来的部分，防止过曝刺眼\n\
+                     • 趾部 Toe：暗部被轻轻抬起的部分，避免死黑并保留层次\n\
+                     • 中间调 Mid-tones：保留线性、最自然的亮度区间\n\
+                     • 饱和度保护：映射时自动抑制高光假色（荧光蓝/洋红）\n\
+                     三种模式差异：\n\
+                     • 无：直接输出，推曝光时高光容易裁切发白\n\
+                     • AgX：电影感映射， shoulder 更平滑，暗部偏沉，适合人像/日常\n\
+                     • Filmic：经典 Hable 胶片曲线，灰阶油润、过渡柔和，适合风景/胶片感",
+                );
+                egui::ComboBox::from_label("")
+                    .selected_text(match mode {
+                        0 => "无",
+                        1 => "AgX",
+                        _ => "Filmic",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut mode, 0, "无")
+                            .on_hover_text("关闭影调压缩。适合原图曝光已很准、不想改变反差的情况；推曝光时高光容易过曝。");
+                        ui.selectable_value(&mut mode, 1, "AgX")
+                            .on_hover_text("Academy Color Encoding System 启发的映射：高光 shoulder 宽、暗部 toe 沉，整体对比自然，肤色和天空过渡最不容易出假色。");
+                        ui.selectable_value(&mut mode, 2, "Filmic")
+                            .on_hover_text("基于 Hable Filmic 的经典胶片曲线：灰阶柔顺、亮部略带 roll-off，容易得到胶片/电影油润感。");
+                    });
+            });
+            self.adj.tone_map = match mode {
+                1 => ToneMapMode::Agx,
+                2 => ToneMapMode::Filmic,
+                _ => ToneMapMode::None,
+            };
+            changed |= self.adj.tone_map != old_mode;
+        });
+
+        // 白平衡
+        Self::collapsing_section("白平衡", force_open, ui, |ui| {
+            changed |= self.param_slider(ui, Field::WBTemp);
+            changed |= self.param_slider(ui, Field::WBTint);
+        });
+
+        // 去假色
+        Self::collapsing_section("去假色", force_open, ui, |ui| {
+            ui.label(egui::RichText::new("消除色度溢出产生的假色（紫边 / 荧光色块），尤其高反差边缘、天空、肤色。").size(11.0).weak());
+            changed |= ui
+                .checkbox(&mut self.adj.defake.enabled, "启用")
+                .on_hover_text("开启假色抑制；默认轻微，不会洗掉正常饱和色")
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut self.adj.defake.chroma_decay, 0.0..=1.0)
+                        .text("亮度联动衰减"),
+                )
+                .on_hover_text("高光越亮，假色抑制越强。0=恒定，1=完全跟随亮度。日常保持默认即可")
+                .changed();
+            changed |= ui
+                .checkbox(&mut self.adj.defake.fix_sky, "天空修正")
+                .on_hover_text("针对天空蓝→青的色偏单独校正，避免天空发紫")
+                .changed();
+            changed |= ui
+                .checkbox(&mut self.adj.defake.protect_skin, "肤色保护")
+                .on_hover_text("抑制时避让肤色区域，防止人脸被误伤发灰")
+                .changed();
+        });
+
+        // 多分区亮度融合（4 区高斯平滑融合，无硬边）—— 前置到基础校正，方便快速压高光 / 提暗部
+        Self::collapsing_section("多分区亮度融合", force_open, ui, |ui| {
+            for i in 0..4 {
+                changed |= self.param_slider(ui, Field::Zone(i));
             }
         });
+
+        // 胶片感 / 光比（核心智能控制：全部走人眼感知曲线，非纯线性）
+        Self::collapsing_section("胶片感 / 光比", force_open, ui, |ui| {
+            changed |= self.param_slider(ui, Field::FilmCurve);
+            changed |= self.param_slider(ui, Field::LightRatio);
+            changed |= self.param_slider(ui, Field::BrightnessLift);
+            changed |= self.param_slider(ui, Field::Contrast);
+            changed |= self.param_slider(ui, Field::Dehaze);
+            changed |= self.param_slider(ui, Field::ShadowLift);
+            changed |= self.param_slider(ui, Field::DeepShadowLift);
+        });
+
+        // ═══ 分类：色彩与风格 ═══
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("色彩与风格").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.separator();
+
+        // 色彩风格
+        Self::collapsing_section("色彩风格", force_open, ui, |ui| {
+            changed |= self.param_slider(ui, Field::Saturation);
+            changed |= self.param_slider(ui, Field::Vibrance);
+            changed |= self.param_slider(ui, Field::HueRotate);
+            changed |= self.param_slider(ui, Field::SplitShadow);
+            changed |= self.param_slider(ui, Field::SplitHighlight);
+        });
+
+        // 胶片 / 风格预设（纯算法，无 AI，无额外依赖）
+        Self::collapsing_section("胶片 / 风格预设", force_open, ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for preset in film_presets() {
+                    if ui
+                        .button(preset.name)
+                        .on_hover_text(preset.description)
+                        .clicked()
+                    {
+                        if preset.is_engine_based {
+                            // 引擎基数：先跑影调感知引擎（颜色正确+影调正确），
+                            // 再叠加本预设的风格增量——自适应原图而非死数值。
+                            if let Some(ref src) = self.src {
+                                let engine = tonal_adjustments(src, self.smart_compensation, 1.0);
+                                self.replace_adj_preserve_geo(Self::blend_adj(
+                                    &engine,
+                                    &preset.adj,
+                                    0.7,
+                                ));
+                            } else {
+                                self.replace_adj_preserve_geo(preset.adj);
+                            }
+                        } else {
+                            self.replace_adj_preserve_geo(preset.adj);
+                        }
+                        self.auto_baseline = Some(self.adj.clone());
+                        self.status = format!("已应用预设：{}", preset.name);
+                        changed = true;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+        });
+
+        // ═══ 分类：智能辅助 ═══
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("智能辅助").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.separator();
+
+        // 智能一键：比原软件更省心（单项自动）
+        Self::collapsing_section("智能一键", force_open, ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("自动曝光").on_hover_text("按直方图把曝光拉到标准中点，确保不过曝不欠曝").clicked() {
+                    self.auto_exposure();
+                    changed = true;
+                }
+                if ui.button("自动白平衡").on_hover_text("消除色偏，把中性灰拉正，还原真实色彩").clicked() {
+                    self.auto_wb();
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("一键粉嫩").on_hover_text("自动去黄+提亮+加粉，健康自然肤色").clicked() {
+                    self.adj.skin = SkinTone::pink();
+                    changed = true;
+                }
+                if ui.button("智能去雾").on_hover_text("压低灰蒙蒙的大气散射，恢复画面通透感").clicked() {
+                    self.auto_dehaze();
+                    changed = true;
+                }
+            });
+            if ui.button("全智能（曝光+白平衡+去雾）").on_hover_text("一次性跑完三项基础自动校正，省心起点").clicked() {
+                self.auto_exposure();
+                self.auto_wb();
+                self.auto_dehaze();
+                changed = true;
+            }
+        });
+
+        // 一键智能：纯算法闭环，后台线程跑，不卡 UI。
+        Self::collapsing_section("一键智能", force_open, ui, |ui| {
+            ui.label(egui::RichText::new("一键中性：纯算法、零 key，把图修到健康中性影调（不过曝）。选力度后点「应用」：").size(11.0).weak());
+            ui.horizontal_wrapped(|ui| {
+                for (label, val, tip) in [
+                    (
+                        "弱",
+                        0.5f32,
+                        "轻度：保留中性化的颜色好处，只做克制的反差/鲜艳微调",
+                    ),
+                    ("中", 1.0f32, "标准：明显修过且不毁图，适合大多数照片"),
+                    (
+                        "强",
+                        1.8f32,
+                        "增强：按影调类型针对性加强反差/暗部/鲜艳，仍保护高光与纯黑",
+                    ),
+                ] {
+                    let selected = (self.neutral_strength - val).abs() < 1e-3;
+                    if ui
+                        .selectable_label(selected, label)
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        self.neutral_strength = val;
+                    }
+                }
+                if ui
+                    .button("应用一键中性")
+                    .on_hover_text("用当前选中力度修图（可重复修 / 确认效果）")
+                    .clicked()
+                {
+                    self.start_local_auto();
+                }
+                if self.auto_running {
+                    ui.label("修图进行中…");
+                }
+            });
+        });
+
+        // ═══ 分类：参考 ═══
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("参考").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.separator();
 
         // 参考图匹配：导入喜欢的图，把当前图影调朝它靠拢（纯算法，零 AI）。
         let ctx2 = ctx.clone();
@@ -2279,140 +2489,20 @@ impl RetouchApp {
             });
         });
 
-        // 胶片 / 风格预设（纯算法，无 AI，无额外依赖）
-        Self::collapsing_section("胶片 / 风格预设", force_open, ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for preset in film_presets() {
-                    if ui
-                        .button(preset.name)
-                        .on_hover_text(preset.description)
-                        .clicked()
-                    {
-                        if preset.is_engine_based {
-                            // 引擎基数：先跑影调感知引擎（颜色正确+影调正确），
-                            // 再叠加本预设的风格增量——自适应原图而非死数值。
-                            if let Some(ref src) = self.src {
-                                let engine = tonal_adjustments(src, self.smart_compensation, 1.0);
-                                self.replace_adj_preserve_geo(Self::blend_adj(
-                                    &engine,
-                                    &preset.adj,
-                                    0.7,
-                                ));
-                            } else {
-                                self.replace_adj_preserve_geo(preset.adj);
-                            }
-                        } else {
-                            self.replace_adj_preserve_geo(preset.adj);
-                        }
-                        self.auto_baseline = Some(self.adj.clone());
-                        self.status = format!("已应用预设：{}", preset.name);
-                        changed = true;
-                    }
-                }
-            });
-            ui.add_space(4.0);
-        });
+        // ═══ 分类：人像 ═══
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("人像").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.separator();
 
-        // 曝光 / 影调
-        Self::collapsing_section("曝光 / 影调", force_open, ui, |ui| {
-            changed |= self.param_slider(ui, Field::ExposureEv);
-            let old_mode = self.adj.tone_map;
-            let mut mode = match old_mode {
-                ToneMapMode::None => 0,
-                ToneMapMode::Agx => 1,
-                ToneMapMode::Filmic => 2,
-            };
+        // 智能美肤 A（v0.6，零模型）
+        Self::collapsing_section("智能美肤", force_open, ui, |ui| {
+            ui.label("一键粉嫩肤色 + 温和频谱磨皮（纯算法，零 AI）。");
             ui.horizontal(|ui| {
-                ui.label("影调映射").on_hover_text(
-                    "决定超过屏幕亮度范围的高光/暗部如何被压缩回 SDR。\n\
-                     常见术语解释：\n\
-                     • 肩部 Shoulder：高光区域被压弯下来的部分，防止过曝刺眼\n\
-                     • 趾部 Toe：暗部被轻轻抬起的部分，避免死黑并保留层次\n\
-                     • 中间调 Mid-tones：保留线性、最自然的亮度区间\n\
-                     • 饱和度保护：映射时自动抑制高光假色（荧光蓝/洋红）\n\
-                     三种模式差异：\n\
-                     • 无：直接输出，推曝光时高光容易裁切发白\n\
-                     • AgX：电影感映射， shoulder 更平滑，暗部偏沉，适合人像/日常\n\
-                     • Filmic：经典 Hable 胶片曲线，灰阶油润、过渡柔和，适合风景/胶片感",
-                );
-                egui::ComboBox::from_label("")
-                    .selected_text(match mode {
-                        0 => "无",
-                        1 => "AgX",
-                        _ => "Filmic",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut mode, 0, "无")
-                            .on_hover_text("关闭影调压缩。适合原图曝光已很准、不想改变反差的情况；推曝光时高光容易过曝。");
-                        ui.selectable_value(&mut mode, 1, "AgX")
-                            .on_hover_text("Academy Color Encoding System 启发的映射：高光 shoulder 宽、暗部 toe 沉，整体对比自然，肤色和天空过渡最不容易出假色。");
-                        ui.selectable_value(&mut mode, 2, "Filmic")
-                            .on_hover_text("基于 Hable Filmic 的经典胶片曲线：灰阶柔顺、亮部略带 roll-off，容易得到胶片/电影油润感。");
-                    });
+                ui.label("强度");
+                ui.add(egui::Slider::new(&mut self.beauty_strength, 0.0..=1.0).suffix("%"));
             });
-            self.adj.tone_map = match mode {
-                1 => ToneMapMode::Agx,
-                2 => ToneMapMode::Filmic,
-                _ => ToneMapMode::None,
-            };
-            changed |= self.adj.tone_map != old_mode;
-        });
-
-        // 去假色
-        Self::collapsing_section("去假色", force_open, ui, |ui| {
-            changed |= ui.checkbox(&mut self.adj.defake.enabled, "启用").changed();
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut self.adj.defake.chroma_decay, 0.0..=1.0)
-                        .text("亮度联动衰减"),
-                )
-                .changed();
-            changed |= ui
-                .checkbox(&mut self.adj.defake.fix_sky, "天空修正")
-                .changed();
-            changed |= ui
-                .checkbox(&mut self.adj.defake.protect_skin, "肤色保护")
-                .changed();
-        });
-
-        // 胶片感 / 光比（核心智能控制：全部走人眼感知曲线，非纯线性）
-        Self::collapsing_section("胶片感 / 光比", force_open, ui, |ui| {
-            changed |= self.param_slider(ui, Field::FilmCurve);
-            changed |= self.param_slider(ui, Field::LightRatio);
-            changed |= self.param_slider(ui, Field::BrightnessLift);
-            changed |= self.param_slider(ui, Field::Contrast);
-            changed |= self.param_slider(ui, Field::Dehaze);
-            changed |= self.param_slider(ui, Field::ShadowLift);
-            changed |= self.param_slider(ui, Field::DeepShadowLift);
-        });
-
-        // 白平衡
-        Self::collapsing_section("白平衡", force_open, ui, |ui| {
-            changed |= self.param_slider(ui, Field::WBTemp);
-            changed |= self.param_slider(ui, Field::WBTint);
-        });
-
-        // 色彩风格
-        Self::collapsing_section("色彩风格", force_open, ui, |ui| {
-            changed |= self.param_slider(ui, Field::Saturation);
-            changed |= self.param_slider(ui, Field::Vibrance);
-            changed |= self.param_slider(ui, Field::HueRotate);
-            changed |= self.param_slider(ui, Field::SplitShadow);
-            changed |= self.param_slider(ui, Field::SplitHighlight);
-        });
-
-        // HSL 分区
-        Self::collapsing_section("HSL 分区", force_open, ui, |ui| {
-            let names = ["红", "橙", "黄", "绿", "青", "蓝", "紫", "品红"];
-            for (i, name) in names.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(*name).strong());
-                    ui.label("  ");
-                });
-                changed |= self.param_slider(ui, Field::HslHue(i));
-                changed |= self.param_slider(ui, Field::HslSat(i));
-                changed |= self.param_slider(ui, Field::HslLight(i));
-                ui.add_space(4.0);
+            if ui.button("一键美肤").on_hover_text("按当前强度一键粉嫩肤色 + 温和磨皮，人像更通透").clicked() {
+                self.apply_smart_beauty(self.beauty_strength);
             }
         });
 
@@ -2420,6 +2510,7 @@ impl RetouchApp {
         Self::collapsing_section("粉嫩肤色", force_open, ui, |ui| {
             changed |= ui
                 .checkbox(&mut self.adj.skin.enabled, "启用肤色优化")
+                .on_hover_text("开启后按下方滑块定向优化肤色")
                 .changed();
             let mut skin_touched = false;
             skin_touched |= self.param_slider(ui, Field::SkinStrength);
@@ -2442,19 +2533,48 @@ impl RetouchApp {
             }
         });
 
-        // 多分区亮度融合（4 区高斯平滑融合，无硬边）
-        Self::collapsing_section("多分区亮度融合", force_open, ui, |ui| {
-            for i in 0..4 {
-                changed |= self.param_slider(ui, Field::Zone(i));
+        // 高级修图（原 M6）：频谱磨皮
+        Self::collapsing_section("高级修图", force_open, ui, |ui| {
+            changed |= ui
+                .checkbox(&mut self.adj.advanced.freqsep.enabled, "频谱磨皮")
+                .on_hover_text("人像专用：分离纹理与色块，只柔化色块保留细节。日常照片不建议开")
+                .changed();
+            let mut fs_touched = false;
+            fs_touched |= self.param_slider(ui, Field::FreqSepStrength);
+            fs_touched |= self.param_slider(ui, Field::FreqSepTexture);
+            fs_touched |= self.param_slider(ui, Field::FreqSepSmooth);
+            fs_touched |= self.param_slider(ui, Field::FreqSepFeather);
+            // 动一下磨皮滑块就自动启用（默认启用体验）。
+            if fs_touched {
+                self.adj.advanced.freqsep.enabled = true;
+                changed = true;
             }
+            // 金字塔融合已移除：实测容易把整图糊掉，且与多分区亮度融合重叠。
         });
 
-        // 几何预处理（M4b）：裁剪 / 旋转 / 翻转 / 透视
+        // ═══ 分类：细节与修复 ═══
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("细节与修复").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.separator();
+
+        // 细节后处理（M5）：降噪 / 锐化 / 柔光
+        Self::collapsing_section("细节后处理", force_open, ui, |ui| {
+            changed |= self.param_slider(ui, Field::DetailDenoise);
+            changed |= self.param_slider(ui, Field::DetailSharpen);
+            changed |= self.param_slider(ui, Field::DetailDiffuse);
+        });
+
+        // ═══ 分类：结构与构图 ═══
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("结构与构图").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.separator();
+
+        // 旋转与裁剪（M4b）：裁剪 / 旋转 / 翻转 / 透视
         // 设计：几何是「预览显示变换」，与重型颜色管线彻底解耦。旋转/翻转/裁剪
         // 只作用在已校色的小基图上（rebuild_preview，同步、微秒级），绝不重新跑
         // OKLCH/多分区/肤色等模块；因此旋转永远不可能触发底层外部异常崩溃。
         // 所有几何改动统一路由到 dirty_geo，不碰颜色管线（不污染 self.dirty）。
-        Self::collapsing_section("几何预处理", force_open, ui, |ui| {
+        Self::collapsing_section("旋转与裁剪", force_open, ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .button("↺ 左转 90°")
@@ -2594,59 +2714,57 @@ impl RetouchApp {
             }
         });
 
-        // 细节后处理（M5）：降噪 / 锐化 / 柔光
-        Self::collapsing_section("细节后处理", force_open, ui, |ui| {
-            changed |= self.param_slider(ui, Field::DetailDenoise);
-            changed |= self.param_slider(ui, Field::DetailSharpen);
-            changed |= self.param_slider(ui, Field::DetailDiffuse);
-        });
+        // ═══ 分类：高级 / 诊断 ═══
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("高级 / 诊断").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.separator();
 
-        // 高级修图（原 M6）：频谱磨皮
-        Self::collapsing_section("高级修图", force_open, ui, |ui| {
-            changed |= ui
-                .checkbox(&mut self.adj.advanced.freqsep.enabled, "频谱磨皮")
-                .on_hover_text("人像专用：分离纹理与色块，只柔化色块保留细节。日常照片不建议开")
-                .changed();
-            let mut fs_touched = false;
-            fs_touched |= self.param_slider(ui, Field::FreqSepStrength);
-            fs_touched |= self.param_slider(ui, Field::FreqSepTexture);
-            fs_touched |= self.param_slider(ui, Field::FreqSepSmooth);
-            fs_touched |= self.param_slider(ui, Field::FreqSepFeather);
-            // 动一下磨皮滑块就自动启用（默认启用体验）。
-            if fs_touched {
-                self.adj.advanced.freqsep.enabled = true;
-                changed = true;
+        // HSL 分区
+        Self::collapsing_section("HSL 分区", force_open, ui, |ui| {
+            let names = ["红", "橙", "黄", "绿", "青", "蓝", "紫", "品红"];
+            for (i, name) in names.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(*name).strong());
+                    ui.label("  ");
+                });
+                changed |= self.param_slider(ui, Field::HslHue(i));
+                changed |= self.param_slider(ui, Field::HslSat(i));
+                changed |= self.param_slider(ui, Field::HslLight(i));
+                ui.add_space(4.0);
             }
-            // 金字塔融合已移除：实测容易把整图糊掉，且与多分区亮度融合重叠。
         });
 
-        // 智能一键：比原软件更省心
-        Self::collapsing_section("智能一键", force_open, ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("自动曝光").clicked() {
-                    self.auto_exposure();
-                    changed = true;
+        // 图像分析：把原图量化成 OKLCH 指标，让用户"看见"影调/色偏/肤色。
+        Self::collapsing_section("图像分析", force_open, ui, |ui| {
+            if let Some(m) = &self.img_metrics {
+                ui.label(format!(
+                    "亮度 均值 {:.2}  反差 {:.2}  范围 {:.2}",
+                    m.tone.mean_l, m.tone.std_l, m.dynamic_range
+                ));
+                ui.label(format!(
+                    "色彩 平均彩度 {:.3}  主色相 {:.0}°  集中度 {:.2}",
+                    m.color.mean_c, m.color.mean_h_deg, m.color.hue_peakiness
+                ));
+                ui.label(format!(
+                    "削波 高光 {:.2}%  暗部 {:.2}%",
+                    m.exposure.highlight_clip_pct, m.exposure.shadow_clip_pct
+                ));
+                ui.label(format!(
+                    "色域外 {:.2}%  色偏强度 {:.3}",
+                    m.gamut.clip_pct, m.cast.chroma
+                ));
+                if m.skin.ratio > 0.03 {
+                    ui.label(format!(
+                        "肤色 占比 {:.1}%  彩度 {:.3}  色相 {:.0}°",
+                        m.skin.ratio * 100.0,
+                        m.skin.mean_c,
+                        m.skin.mean_h_deg
+                    ));
+                } else {
+                    ui.label("肤色 未检出");
                 }
-                if ui.button("自动白平衡").clicked() {
-                    self.auto_wb();
-                    changed = true;
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui.button("一键粉嫩").clicked() {
-                    self.adj.skin = SkinTone::pink();
-                    changed = true;
-                }
-                if ui.button("智能去雾").clicked() {
-                    self.auto_dehaze();
-                    changed = true;
-                }
-            });
-            if ui.button("全智能（曝光+白平衡+去雾）").clicked() {
-                self.auto_exposure();
-                self.auto_wb();
-                self.auto_dehaze();
-                changed = true;
+            } else {
+                ui.label("打开图片后显示量化指标");
             }
         });
 
@@ -2700,78 +2818,55 @@ impl RetouchApp {
                 });
                 if let Some(t) = &self.last_title {
                     ui.separator();
+                    // 作品名（可点选复制）
                     let title = if let Some(s) = t.find('》') {
                         &t[..s + 3]
                     } else {
                         &t[..]
                     };
-                    ui.add(egui::Label::new(
-                        egui::RichText::new(title).size(15.0).strong(),
-                    ));
-                    let review = if let Some(s) = t.find('—') {
-                        &t[s + 2..]
-                    } else if let Some(s) = t.find('》') {
-                        &t[s + 3..]
-                    } else {
-                        ""
-                    };
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(title).size(15.0).strong())
+                            .selectable(true),
+                    );
+                    ui.horizontal(|ui| {
+                        let name_only = title.replace('《', "").replace('》', "");
+                        if ui.button("复制作品名").clicked() {
+                            ui.ctx().copy_text(name_only);
+                        }
+                        if ui.button("复制全部").clicked() {
+                            ui.ctx().copy_text(t.clone());
+                        }
+                    });
+                    // 点评（安全切分：用 split_once 走字符边界，绝不 panic）
+                    let review = t
+                        .split_once('—')
+                        .map(|(_, c)| c.trim())
+                        .or_else(|| t.split_once('》').map(|(_, c)| c.trim()))
+                        .unwrap_or("");
                     if !review.trim().is_empty() {
                         ui.add_space(2.0);
                         egui::ScrollArea::vertical()
                             .id_salt("review_scroll")
-                            .max_height(120.0)
+                            .max_height(140.0)
                             .show(ui, |ui| {
-                                ui.add(egui::Label::new(
-                                    egui::RichText::new(review.trim())
-                                        .size(13.0)
-                                        .color(egui::Color32::from_gray(180)),
-                                ));
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(review.trim())
+                                            .size(13.0)
+                                            .color(egui::Color32::from_gray(180)),
+                                    )
+                                    .selectable(true),
+                                );
                             });
+                        if ui.button("复制点评").clicked() {
+                            ui.ctx().copy_text(review.trim().to_string());
+                        }
                     }
                 }
             },
         );
         self.qwen_open = qopen;
         }
-
-        // 一键智能：纯算法闭环，后台线程跑，不卡 UI。
-        Self::collapsing_section("一键智能", force_open, ui, |ui| {
-            ui.label(egui::RichText::new("一键中性：纯算法、零 key，把图修到健康中性影调（不过曝）。选力度后点「应用」：").size(11.0).weak());
-            ui.horizontal_wrapped(|ui| {
-                for (label, val, tip) in [
-                    (
-                        "弱",
-                        0.5f32,
-                        "轻度：保留中性化的颜色好处，只做克制的反差/鲜艳微调",
-                    ),
-                    ("中", 1.0f32, "标准：明显修过且不毁图，适合大多数照片"),
-                    (
-                        "强",
-                        1.8f32,
-                        "增强：按影调类型针对性加强反差/暗部/鲜艳，仍保护高光与纯黑",
-                    ),
-                ] {
-                    let selected = (self.neutral_strength - val).abs() < 1e-3;
-                    if ui
-                        .selectable_label(selected, label)
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
-                        self.neutral_strength = val;
-                    }
-                }
-                if ui
-                    .button("应用一键中性")
-                    .on_hover_text("用当前选中力度修图（可重复修 / 确认效果）")
-                    .clicked()
-                {
-                    self.start_local_auto();
-                }
-                if self.auto_running {
-                    ui.label("修图进行中…");
-                }
-            });
-        });
 
         ui.separator();
         egui::Frame::group(ui.style())
@@ -3302,6 +3397,21 @@ impl RetouchApp {
             self.current_tip = tips::random_tip();
         }
 
+        // 小技巧每 20 秒自动换一条。
+        // 用 ctx 时钟比对「固定目标时间」next_tip_at，避免每帧把计时器往后推导致永不触发；
+        // request_repaint_after 保证无用户操作时也能被唤醒（不会卡住不换）。
+        let now = ctx.input(|i| i.time);
+        if self.next_tip_at <= 0.0 {
+            self.next_tip_at = now + 20.0;
+        }
+        if now >= self.next_tip_at {
+            self.current_tip = tips::next_tip(self.current_tip);
+            self.next_tip_at = now + 20.0;
+            ctx.request_repaint();
+        }
+        let until = (self.next_tip_at - now).max(0.0);
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(until));
+
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K)) {
             self.show_cmd = !self.show_cmd;
         }
@@ -3370,6 +3480,7 @@ impl RetouchApp {
                                        // 换一句按钮
                     if Self::toolbar_btn(ui, "换一句", "换一条修图小技巧") {
                         self.current_tip = tips::next_tip(self.current_tip);
+                        self.next_tip_at = now + 20.0; // 手动换后重置 20s 计时，避免立刻又自动跳
                     }
                     ui.add_space(4.0);
                     // 主题切换按钮
@@ -3542,6 +3653,11 @@ impl RetouchApp {
                     }
                 });
 
+                // 行尾右间距：Mac 顶部面板右内边距偏小，最右「污点」按钮会贴边框；
+                // Windows 默认边距够，保持 4px 不动。这里仅 Mac 加宽到 14px。
+                #[cfg(target_os = "macos")]
+                ui.add_space(14.0);
+                #[cfg(not(target_os = "macos"))]
                 ui.add_space(4.0);
             });
         });
@@ -3614,6 +3730,34 @@ impl RetouchApp {
         // 每帧检查「生成作品名」异步结果，落到状态栏。
         #[cfg(feature = "qwen")]
         self.poll_title();
+        // 生成作品名后，把窗口标题栏同步为作品名（仅变化时发送 ViewportCommand）。
+        #[cfg(feature = "qwen")]
+        {
+            match &self.last_title {
+                Some(t) => {
+                    let name = t
+                        .split('《')
+                        .nth(1)
+                        .and_then(|x| x.split('》').next())
+                        .unwrap_or(t)
+                        .trim()
+                        .to_string();
+                    if self.applied_title.as_deref() != Some(name.as_str()) {
+                        self.applied_title = Some(name.clone());
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                            "初色 · {}",
+                            name
+                        )));
+                    }
+                }
+                None => {
+                    if self.applied_title.is_some() {
+                        self.applied_title = None;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Title("初色".to_string()));
+                    }
+                }
+            }
+        }
         // v0.6.3：轮询后台导入 / 切图解码 / 批量导出，界面全程不冻结。
         self.poll_import();
         self.poll_load();
