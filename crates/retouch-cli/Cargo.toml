@@ -12,6 +12,7 @@ default = []
 
 [dependencies]
 retouch-core = { path = "../retouch-core" }
+retouch-agent = { path = "../retouch-agent" }
 clap = { version = "4", features = ["derive"] }
 image = "0.25"
 palette = "0.7"

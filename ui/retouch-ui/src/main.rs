@@ -124,6 +124,9 @@ struct RetouchApp {
     applied_title: Option<String>,
     /// Qwen(DashScope) Key，仅用于「生成作品名」；填一次后写入本地文件记住，免重复输入。
     api_qwen_key: String,
+    /// 可选：HTTPS 代理（如 http://127.0.0.1:50434）。Finder 双击启动的 GUI 不继承
+    /// 终端 env 代理，需手动填；留空则自动探测 env / 登录 shell。写入本地文件记住。
+    qwen_proxy: String,
     /// 作品名设置面板是否展开（默认折叠；记住 key 后无需每次展开）。
     qwen_open: bool,
     /// Async preview-render channel. render_tx sends jobs, render_rx receives results.
@@ -433,6 +436,7 @@ impl RetouchApp {
                 #[cfg(not(feature = "qwen"))]
                 { String::new() }
             },
+            qwen_proxy: Self::load_qwen_proxy(),
             qwen_open: false,
             render_tx,
             render_rx: result_rx,
@@ -815,6 +819,13 @@ impl RetouchApp {
                     .into();
             return;
         }
+        eprintln!("[gui] title: key loaded len={}", key.trim().len());
+        // 手动填的代理写进进程 env，供 review 的 detect_proxy 读到（Finder 启动无终端 env）。
+        if !self.qwen_proxy.trim().is_empty() {
+            std::env::set_var("HTTPS_PROXY", self.qwen_proxy.trim());
+            std::env::set_var("HTTP_PROXY", self.qwen_proxy.trim());
+            eprintln!("[gui] title: using manual proxy {}", self.qwen_proxy.trim());
+        }
         let path = self.src_path.clone().unwrap();
         let metrics = self.img_metrics.clone();
         let summary = "中性校正 + 影调优化".to_string();
@@ -824,7 +835,10 @@ impl RetouchApp {
         self.status = "正在生成作品名（Qwen 视觉）…".into();
         std::thread::spawn(move || {
             let b64 = match thumb_b64(&path, 512) {
-                Ok(b) => b,
+                Ok(b) => {
+                    eprintln!("[gui] title: thumb ok len={}", b.len());
+                    b
+                }
                 Err(e) => {
                     eprintln!("作品名缩略图失败: {}", e);
                     if let Ok(mut g) = err_out.lock() {
@@ -856,6 +870,7 @@ impl RetouchApp {
                     if let Ok(mut g) = out.lock() {
                         *g = Some(text);
                     }
+                    eprintln!("[gui] title: ok title={}", title);
                 }
                 Err(e) => {
                     eprintln!("Qwen 作品名失败: {}", e);
@@ -2003,6 +2018,23 @@ impl RetouchApp {
     fn forget_qwen_key() {
         let _ = std::fs::remove_file(Self::qwen_key_path());
     }
+    /// 代理地址文件（与 key 同目录 ~/.retouch/qwen_proxy）。
+    fn qwen_proxy_path() -> std::path::PathBuf {
+        let mut p = Self::qwen_key_path();
+        p.set_file_name("qwen_proxy");
+        p
+    }
+    fn load_qwen_proxy() -> String {
+        std::fs::read_to_string(Self::qwen_proxy_path())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    }
+    fn save_qwen_proxy(proxy: &str) {
+        if let Some(parent) = Self::qwen_proxy_path().parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(Self::qwen_proxy_path(), proxy.trim());
+    }
 
     /// 可记忆展开/折叠状态的分组卡片（默认折叠用）：点击标题切换 `open`。
     fn collapsing_section_state(
@@ -2835,6 +2867,19 @@ impl RetouchApp {
                     if r.changed() {
                         self.api_qwen_key = key.trim().to_string();
                         Self::save_qwen_key(&self.api_qwen_key);
+                        changed = true;
+                    }
+                });
+                let mut proxy = self.qwen_proxy.clone();
+                ui.horizontal(|ui| {
+                    ui.label("代理(可选)");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut proxy)
+                            .hint_text("http://127.0.0.1:50434（VPN 代理）"),
+                    );
+                    if r.changed() {
+                        self.qwen_proxy = proxy.trim().to_string();
+                        Self::save_qwen_proxy(&self.qwen_proxy);
                         changed = true;
                     }
                 });

@@ -13,3 +13,7 @@ image = "0.25"
 # 交叉编译到 Windows（需 perl/asm），会导致 Win 版带不上 qwen。native-tls 无此问题。
 ureq = { version = "2.9", default-features = false, features = ["json", "native-tls"] }
 base64 = "0.22"
+# 直接依赖 native-tls：ureq 2.12 的 native-tls feature 只引入 crate、不会自动接线，
+# 必须手动 AgentBuilder::tls_connector(native_tls::TlsConnector) 才能在走代理的
+# HTTPS 隧道里用上系统 TLS（macOS=SecureTransport / Win=Schannel，不依赖 ring）。
+native-tls = "0.2"

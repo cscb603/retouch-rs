@@ -56,12 +56,58 @@ impl QwenClient {
             ],
             "max_tokens": 600
         });
-        let resp = ureq::post(QWEN_URL)
-            .timeout(std::time::Duration::from_secs(25))
+        // ===== 代理探测：Finder 双击启动的 GUI 不继承终端 env，故先看进程 env；
+        // 若用户在「作品名设置」手动填了代理，应用启动时会写进进程 env，这里也能读到。
+        // 命中则显式接给 ureq；都没有则直连。=====
+        let proxy = detect_proxy();
+        if let Some(p) = &proxy {
+            eprintln!("[qwen] proxy: {}", p);
+        } else {
+            eprintln!("[qwen] proxy: (none, direct)");
+        }
+
+        // ===== 追踪日志（排障用，不影响逻辑）=====
+        let klen = self.api_key.trim().len();
+        let kmask = if klen == 0 {
+            "(empty)".to_string()
+        } else {
+            format!("{}…(len={})", &self.api_key.trim()[..klen.min(4)], klen)
+        };
+        eprintln!(
+            "[qwen] review: model={} url={} key={}",
+            self.model, QWEN_URL, kmask
+        );
+        eprintln!(
+            "[qwen] payload: thumb_b64.len={} metrics.len={} summary.len={}",
+            thumb_b64.len(),
+            metrics_json.len(),
+            process_summary.len()
+        );
+        eprintln!("[qwen] -> POST https (ureq), timeout=25s");
+        let mut builder = ureq::builder().timeout(std::time::Duration::from_secs(25));
+        // 手动接 native-tls：ureq 2.12 的 native-tls feature 不会自动接线，
+        // 尤其走代理的 HTTPS CONNECT 隧道必须显式提供 TLS 连接器，否则报 no TLS backend。
+        match native_tls::TlsConnector::new() {
+            Ok(tls) => builder = builder.tls_connector(std::sync::Arc::new(tls)),
+            Err(e) => eprintln!("[qwen] TLS 初始化失败: {}", e),
+        }
+        if let Some(p) = &proxy {
+            match ureq::Proxy::new(p) {
+                Ok(proxy_obj) => builder = builder.proxy(proxy_obj),
+                Err(e) => eprintln!("[qwen] proxy 初始化失败({})，退回直连", e),
+            }
+        }
+        let agent = builder.build();
+        let resp = agent
+            .post(QWEN_URL)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .set("Content-Type", "application/json")
-            .send_json(body)
-            .map_err(|e| format!("Qwen 请求失败: {}", e))?;
+            .send_json(body);
+        match &resp {
+            Ok(r) => eprintln!("[qwen] <- HTTP status={}", r.status()),
+            Err(e) => eprintln!("[qwen] <- HTTP ERROR: {:?}", e),
+        }
+        let resp = resp.map_err(|e| format!("Qwen 请求失败: {}", e))?;
         let v: Value = resp
             .into_json()
             .map_err(|e| format!("Qwen 响应解析失败: {}", e))?;
@@ -69,6 +115,41 @@ impl QwenClient {
         let obj: Value = serde_json::from_str(text).unwrap_or(Value::Null);
         Ok(obj)
     }
+}
+
+/// 探测 HTTPS 代理地址（返回 None 表示直连）。
+/// 优先级：进程 env（HTTPS_PROXY / HTTP_PROXY / 小写）> 登录 shell best-effort。
+/// Finder 双击启动的 GUI 不继承终端 env，但用户在「作品名设置」手动填的代理会被
+/// 写进进程 env，这里就能读到；若都没有则直连。
+fn detect_proxy() -> Option<String> {
+    for var in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    // best-effort：从登录 shell 取（GUI 从 Finder 启动、且未手动配置代理时尝试）
+    for sh in ["/bin/zsh", "/bin/bash"] {
+        if let Ok(out) = std::process::Command::new(sh)
+            .args(["-lc", "echo -n \"$HTTPS_PROXY\""])
+            .output()
+        {
+            if let Ok(s) = String::from_utf8(out.stdout) {
+                let s = s.trim().to_string();
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// 把图片缩放到最长边 `max_side` 以内并返回 base64 JPEG（质量 82）。

@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use image::{DynamicImage, GenericImageView, Rgb, RgbImage};
+use retouch_agent::{thumb_b64, QwenClient};
 use palette::{IntoColor, LinSrgb, Oklch};
 use retouch_core::pipeline::{
     render, Adjustments, ColorGrade, DefakeColor, Grade, HslRegions, SkinTone, ToneMapMode,
@@ -279,6 +280,19 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         rounds: usize,
         /// Emit a `result.json` next to the output
+        #[arg(long)]
+        json: bool,
+    },
+    /// 用 Qwen 视觉为照片起名 + 点评（联网，需 DashScope Key）。
+    /// 同时作为 AI 可调用的薄壳：--json 输出结构化信封 {ok,title,title_en,comment,comment_en}。
+    /// 不传 --key 时依次读 $DASHSCOPE_API_KEY / ~/.retouch/qwen_key。
+    Name {
+        /// 输入图片路径（原图即可，会自动缩到最长边 512px）
+        input: PathBuf,
+        /// Qwen/DashScope API Key（省略则读 env / ~/.retouch/qwen_key）
+        #[arg(long)]
+        key: Option<String>,
+        /// 输出 JSON 信封（默认人类可读）
         #[arg(long)]
         json: bool,
     },
@@ -725,6 +739,85 @@ fn main() {
                         "  采用参数: {}",
                         serde_json::to_string(&result.applied_params).unwrap()
                     );
+                }
+            }
+        },
+        Command::Name { input, key, json } => {
+            // key 解析优先级：--key > $DASHSCOPE_API_KEY > ~/.retouch/qwen_key
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".to_string());
+            let mut kp = std::path::PathBuf::from(home);
+            kp.push(".retouch");
+            kp.push("qwen_key");
+            let key = match key.filter(|k| !k.trim().is_empty()) {
+                Some(k) => k.trim().to_string(),
+                None => match std::env::var("DASHSCOPE_API_KEY")
+                    .ok()
+                    .filter(|k| !k.trim().is_empty())
+                {
+                    Some(k) => k.trim().to_string(),
+                    None => std::fs::read_to_string(&kp)
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default(),
+                },
+            };
+            if key.trim().is_empty() {
+                eprintln!(
+                    "[name] ERROR: 未提供 Qwen Key（--key / $DASHSCOPE_API_KEY / {}）",
+                    kp.display()
+                );
+                std::process::exit(2);
+            }
+            eprintln!(
+                "[name] key loaded: len={} prefix={}…",
+                key.trim().len(),
+                &key.trim()[..key.trim().len().min(4)]
+            );
+            eprintln!("[name] opening image: {}", input.display());
+            let b64 = match thumb_b64(&input, 512) {
+                Ok(b) => {
+                    eprintln!("[name] thumb ok: base64 len={}", b.len());
+                    b
+                }
+                Err(e) => {
+                    eprintln!("[name] thumb FAILED: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            eprintln!("[name] calling QwenClient::review ...");
+            match QwenClient::new(key).review(&b64, "{}", "中性校正 + 影调优化") {
+                Ok(v) => {
+                    let title = v.get("title").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let title_en = v.get("title_en").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let comment = v.get("comment").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let comment_en = v.get("comment_en").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    if json {
+                        let env = serde_json::json!({
+                            "ok": true,
+                            "title": title,
+                            "title_en": title_en,
+                            "comment": comment,
+                            "comment_en": comment_en,
+                        });
+                        println!("{}", serde_json::to_string(&env).unwrap());
+                    } else {
+                        println!("《{}》 ({})", title, title_en);
+                        println!("点评: {}", comment);
+                        if !comment_en.is_empty() {
+                            println!("EN: {}", comment_en);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[name] review FAILED: {}", e);
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&serde_json::json!({"ok": false, "error": e})).unwrap()
+                        );
+                    }
+                    std::process::exit(1);
                 }
             }
         },
