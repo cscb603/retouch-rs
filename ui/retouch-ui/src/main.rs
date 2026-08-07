@@ -2146,29 +2146,30 @@ impl RetouchApp {
             ui.group(|ui| {
                 ui.label(egui::RichText::new("污点修复画笔").strong());
                 // 算法档位：传统(Telea) / 自然(频率分离) / 精修(Poisson) / 内容感知(PatchMatch)。
+                // items 提到闭包外，供下方「全部改用此档位」按钮复用标签查找。
+                let items = [
+                    (
+                        HealMode::Telea,
+                        "传统",
+                        "传统 Telea 扩散算法：适合极小污点，速度快",
+                    ),
+                    (
+                        HealMode::FreqSep,
+                        "自然",
+                        "频率分离融合：保留源块纹理+目标光照，自然无痕",
+                    ),
+                    (
+                        HealMode::Poisson,
+                        "精修",
+                        "Poisson 梯度域无缝克隆：完全无痕，适合精细修复",
+                    ),
+                    (
+                        HealMode::PatchMatch,
+                        "内容感知",
+                        "内容感知移除（PatchMatch）：细线/电线/杆/细缝去除更自然，纹理连续；大块物体仍建议精修",
+                    ),
+                ];
                 ui.columns(4, |cols| {
-                    let items = [
-                        (
-                            HealMode::Telea,
-                            "传统",
-                            "传统 Telea 扩散算法：适合极小污点，速度快",
-                        ),
-                        (
-                            HealMode::FreqSep,
-                            "自然",
-                            "频率分离融合：保留源块纹理+目标光照，自然无痕",
-                        ),
-                        (
-                            HealMode::Poisson,
-                            "精修",
-                            "Poisson 梯度域无缝克隆：完全无痕，适合精细修复",
-                        ),
-                        (
-                            HealMode::PatchMatch,
-                            "内容感知",
-                            "内容感知移除（PatchMatch）：细线/电线/杆/细缝去除更自然，纹理连续；大块物体仍建议精修",
-                        ),
-                    ];
                     for (i, (mode, label, tip)) in items.iter().enumerate() {
                         let selected = self.heal_mode == *mode;
                         if cols[i]
@@ -2177,11 +2178,37 @@ impl RetouchApp {
                             .clicked()
                         {
                             self.heal_mode = *mode;
-                            if let Some(s) = &mut self.spot {
-                                s.mode = *mode;
+                            // 仅设定「新笔模板」：已存在的笔保持各自档位，不被动重愈合。
+                            self.status = format!(
+                                "修复档位已设为「{}」：仅对新标记的污点生效；已存在的点保持各自档位",
+                                label
+                            );
+                        }
+                    }
+                });
+                // 显式「全部改用此档位」：只有用户主动点，才会批量改写所有笔的档位并重新愈合。
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("↺ 全部改用此档位")
+                        .on_hover_text("把当前画面所有污点（手动+自动）的修复档位统一改成上面选中的档位。会重新愈合全部点——仅在你确实需要全局换档时点")
+                        .clicked()
+                    {
+                        match &mut self.spot {
+                            Some(spot) if !spot.is_empty() => {
+                                spot.set_all_modes(self.heal_mode);
+                                self.dirty_geo = true;
+                                let lbl = items
+                                    .iter()
+                                    .find(|(m, _, _)| *m == self.heal_mode)
+                                    .map(|(_, l, _)| *l)
+                                    .unwrap_or("");
+                                self.status = format!(
+                                    "已将全部 {} 处污点改为「{}」档位并重新愈合",
+                                    spot.strokes.len(),
+                                    lbl
+                                );
                             }
-                            // 换档只需重合成（几何+污点），不必重跑颜色管线。
-                            self.dirty_geo = true;
+                            _ => self.status = "当前没有污点，无需批量改档".into(),
                         }
                     }
                 });
@@ -2214,12 +2241,11 @@ impl RetouchApp {
                                     let spot = self
                                         .spot
                                         .get_or_insert_with(retouch_core::spot::SpotFix::new);
-                                    spot.mode = self.heal_mode;
                                     // 每次自动检测都覆盖上一次的自动笔触，避免连点翻倍；
-                                    // 手动笔触保留不动。
+                                    // 手动笔触保留不动。检测出的点用「当前档位」作为各自档位。
                                     spot.clear_auto_strokes();
                                     for s in strokes {
-                                        spot.add_auto_stroke(s.cx, s.cy, s.r_norm);
+                                        spot.add_auto_stroke(s.cx, s.cy, s.r_norm, self.heal_mode);
                                     }
                                     // 回到「只显示选区」视图：先让用户看到红圈选区，
                                     // 再点「应用修复」才在预览里真正愈合（贴合 PS 心智）。
@@ -3216,7 +3242,7 @@ impl RetouchApp {
                                 self.spot = Some(nf);
                             }
                             if let Some(s) = &mut self.spot {
-                                s.add_stroke(cx, cy, r_norm);
+                                s.add_stroke(cx, cy, r_norm, self.heal_mode);
                             }
                             // 单击：立即愈合一次
                             if clicked {
@@ -3383,6 +3409,12 @@ impl RetouchApp {
                     let rad = (s.r_norm * side).max(3.0);
                     ui.painter()
                         .circle_stroke(center, rad, egui::Stroke::new(2.0, col));
+                    // 中心点按「本笔各自档位」着色：一眼看清每张污点用的是哪种算法。
+                    ui.painter().circle_filled(
+                        center,
+                        (rad * 0.28).clamp(2.0, 5.0),
+                        Self::mode_color(s.mode),
+                    );
                 }
             }
         }
@@ -3390,6 +3422,16 @@ impl RetouchApp {
         // Hint overlay.
         if resp.hovered() && self.tool_mode == ToolMode::Adjust {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+        }
+    }
+
+    /// 把修复档位映射到一个醒目的标识色，用于在画布中心小点上区分每笔各自的算法。
+    fn mode_color(mode: HealMode) -> egui::Color32 {
+        match mode {
+            HealMode::Telea => egui::Color32::from_rgb(150, 150, 150), // 灰：传统
+            HealMode::FreqSep => egui::Color32::from_rgb(90, 150, 255), // 蓝：自然
+            HealMode::Poisson => egui::Color32::from_rgb(255, 160, 60), // 橙：精修
+            HealMode::PatchMatch => egui::Color32::from_rgb(200, 100, 255), // 紫：内容感知
         }
     }
 

@@ -11,7 +11,7 @@ use image::{DynamicImage, GrayImage, Rgb, RgbImage};
 use inpaint::telea_inpaint;
 use ndarray::{Array2, Array3};
 
-/// 单笔污点笔画：归一化中心 + 归一化半径（占短边比例）。
+/// 单笔污点笔画：归一化中心 + 归一化半径（占短边比例）+ 各自的修复档位。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SpotStroke {
     /// 水平中心，0..1（相对于正立基图宽度）。
@@ -22,23 +22,26 @@ pub struct SpotStroke {
     pub r_norm: f32,
     /// 是否由「自动检测污点」生成（便于覆盖重跑，不影响手动笔触）。
     pub is_auto: bool,
+    /// 本笔独自的修复档位：每笔可不同，切换全局档位不影响已存在的笔。
+    pub mode: HealMode,
 }
 
 impl SpotStroke {
-    pub fn new(cx: f32, cy: f32, r_norm: f32) -> Self {
-        Self::with_auto(cx, cy, r_norm, false)
+    pub fn new(cx: f32, cy: f32, r_norm: f32, mode: HealMode) -> Self {
+        Self::with_auto(cx, cy, r_norm, false, mode)
     }
 
-    pub fn auto(cx: f32, cy: f32, r_norm: f32) -> Self {
-        Self::with_auto(cx, cy, r_norm, true)
+    pub fn auto(cx: f32, cy: f32, r_norm: f32, mode: HealMode) -> Self {
+        Self::with_auto(cx, cy, r_norm, true, mode)
     }
 
-    fn with_auto(cx: f32, cy: f32, r_norm: f32, is_auto: bool) -> Self {
+    fn with_auto(cx: f32, cy: f32, r_norm: f32, is_auto: bool, mode: HealMode) -> Self {
         Self {
             cx: cx.clamp(0.0, 1.0),
             cy: cy.clamp(0.0, 1.0),
             r_norm: r_norm.max(0.0),
             is_auto,
+            mode,
         }
     }
 }
@@ -59,11 +62,13 @@ pub enum HealMode {
     PatchMatch,
 }
 
-/// 污点修复层：一组笔画 + 算法档位。空 = 无修复（恒等）。
+/// 污点修复层：一组笔触（每笔各自带档位）+ 一个「当前档位」作为新笔模板。
+/// 空 = 无修复（恒等）。
 #[derive(Clone, Debug, Default)]
 pub struct SpotFix {
     pub strokes: Vec<SpotStroke>,
-    /// 修复算法档位（默认 Poisson 精修）。
+    /// 当前修复档位：仅作为「新增笔触的模板 / UI 选中态」，
+    /// 不再对已有笔触统一生效（切换它不会改变任何已存在笔的档位）。
     pub mode: HealMode,
 }
 
@@ -85,12 +90,19 @@ impl SpotFix {
         self.strokes.retain(|s| !s.is_auto);
     }
 
-    pub fn add_stroke(&mut self, cx: f32, cy: f32, r_norm: f32) {
-        self.strokes.push(SpotStroke::new(cx, cy, r_norm));
+    pub fn add_stroke(&mut self, cx: f32, cy: f32, r_norm: f32, mode: HealMode) {
+        self.strokes.push(SpotStroke::new(cx, cy, r_norm, mode));
     }
 
-    pub fn add_auto_stroke(&mut self, cx: f32, cy: f32, r_norm: f32) {
-        self.strokes.push(SpotStroke::auto(cx, cy, r_norm));
+    pub fn add_auto_stroke(&mut self, cx: f32, cy: f32, r_norm: f32, mode: HealMode) {
+        self.strokes.push(SpotStroke::auto(cx, cy, r_norm, mode));
+    }
+
+    /// 显式把全部笔触的档位改为 `mode`（用户主动点的「全部改用此档位」按钮用）。
+    pub fn set_all_modes(&mut self, mode: HealMode) {
+        for s in &mut self.strokes {
+            s.mode = mode;
+        }
     }
 
     /// 修复总入口：按 mode 分派到 Telea / 频率分离 / Poisson。空笔画 = 恒等。
@@ -277,9 +289,8 @@ pub fn render_with_spot(
     let out = crate::pipeline::render(src, adj);
     if let Some(s) = spot {
         if !s.is_empty() {
-            let (w, h) = (out.width(), out.height());
-            let (mask, radius) = s.build_mask(w, h);
-            return inpaint_rgb(&out, &mask, radius);
+            // 走 heal_image：按每笔各自的档位愈合（传统/自然/精修/内容感知各自独立）。
+            return crate::heal::heal_image(&out, s, false);
         }
     }
     out
@@ -293,10 +304,10 @@ mod tests {
     #[test]
     fn clear_auto_strokes_keeps_manual_ones() {
         let mut spot = SpotFix::new();
-        spot.add_stroke(0.1, 0.1, 0.01);
-        spot.add_auto_stroke(0.2, 0.2, 0.02);
-        spot.add_auto_stroke(0.3, 0.3, 0.03);
-        spot.add_stroke(0.4, 0.4, 0.04);
+        spot.add_stroke(0.1, 0.1, 0.01, HealMode::Poisson);
+        spot.add_auto_stroke(0.2, 0.2, 0.02, HealMode::Poisson);
+        spot.add_auto_stroke(0.3, 0.3, 0.03, HealMode::Poisson);
+        spot.add_stroke(0.4, 0.4, 0.04, HealMode::Poisson);
         assert_eq!(spot.strokes.len(), 4);
         spot.clear_auto_strokes();
         assert_eq!(spot.strokes.len(), 2);
@@ -306,6 +317,20 @@ mod tests {
             (spot.strokes[0].cx - 0.1).abs() < 1e-4
                 && (spot.strokes[1].cx - 0.4).abs() < 1e-4
         );
+    }
+
+    #[test]
+    fn set_all_modes_bulk_reassign() {
+        // 「全部改用此档位」= 显式动作，把所有笔统一改档位。
+        let mut spot = SpotFix::new();
+        spot.add_stroke(0.1, 0.1, 0.01, HealMode::Poisson);
+        spot.add_stroke(0.2, 0.2, 0.02, HealMode::FreqSep);
+        spot.add_auto_stroke(0.3, 0.3, 0.03, HealMode::PatchMatch);
+        assert_ne!(spot.strokes[0].mode, spot.strokes[1].mode);
+        spot.set_all_modes(HealMode::Telea);
+        assert!(spot.strokes.iter().all(|s| s.mode == HealMode::Telea));
+        // 手动/自动标记不应被改档动作抹掉。
+        assert!(!spot.strokes[0].is_auto && !spot.strokes[1].is_auto && spot.strokes[2].is_auto);
     }
 
     #[test]
@@ -327,7 +352,7 @@ mod tests {
         }
         let mut spot = SpotFix::new();
         // 中心约 (0.5,0.5)，半径占短边 ~6%（=3.8px）→ 覆盖 4×4 污点。
-        spot.add_stroke(0.5, 0.5, 0.06);
+        spot.add_stroke(0.5, 0.5, 0.06, HealMode::Poisson);
         let (mask, radius) = spot.build_mask(64, 64);
         let out = inpaint_rgb(&img, &mask, radius);
         // 污点中心应被修复，远离背景色。
@@ -343,7 +368,7 @@ mod tests {
     #[test]
     fn build_mask_radius_scales_with_size() {
         let mut spot = SpotFix::new();
-        spot.add_stroke(0.5, 0.5, 0.05);
+        spot.add_stroke(0.5, 0.5, 0.05, HealMode::Poisson);
         let (_m64, r64) = spot.build_mask(64, 64);
         let (_m256, r256) = spot.build_mask(256, 256);
         // 大图上像素半径应更大（比例一致）。
@@ -360,7 +385,7 @@ mod tests {
             }
         }
         let mut spot = SpotFix::new();
-        spot.add_stroke(0.5, 0.5, 0.10); // 半径 6.4px，羽化带 ~3px
+        spot.add_stroke(0.5, 0.5, 0.10, HealMode::Poisson); // 半径 6.4px，羽化带 ~3px
         let out = inpaint_rgb_feathered(&img, &spot);
         // 中心应被修复到接近背景。
         let fixed = out.get_pixel(32, 32).0;

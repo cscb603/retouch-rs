@@ -10,10 +10,16 @@
 //! - 所有运算仅在污点局部 bounding box 上进行，分辨率无关、体量极小、预览实时。
 //! - 任何异常都回退原图（或 Telea），绝不崩。
 
-use crate::spot::{inpaint_rgb, HealMode, SpotFix};
+use crate::spot::{inpaint_rgb, HealMode, SpotFix, SpotStroke};
 use image::{GenericImageView, GrayImage, Rgb, RgbImage};
 
-/// 对整张 RGB 图施加一组污点笔画的修复（按 mode 分派）。空笔画 = 恒等。
+/// 对整张 RGB 图施加一组污点笔画的修复（**按每笔各自的档位**分派）。空笔画 = 恒等。
+///
+/// 关键语义：每笔 `SpotStroke.mode` 独立生效，切换全局档位不会改写已存在笔的档位，
+/// 因此「同一画面里可以有传统/自然/精修/内容感知各自各自的污点」。
+///
+/// 实现：把笔画按档位分组（保留原始顺序），每组在一次愈合趟次里施加各自算法，
+/// 趟次之间串行（前一组结果作为后一组输入）。最多 4 趟，复用各自 per-mode 代码。
 ///
 /// `preview`：true = 交互预览（Poisson 迭代降到 80 次，拖动/松手时够快），
 /// false = 导出定稿（Poisson 满 250 次迭代，追求完全无痕）。
@@ -22,12 +28,31 @@ pub fn heal_image(img: &RgbImage, spot: &SpotFix, preview: bool) -> RgbImage {
     if spot.is_empty() {
         return img.clone();
     }
-    match spot.mode {
-        HealMode::Telea => crate::spot::inpaint_rgb_feathered(img, spot),
-        HealMode::FreqSep => heal_strokes(img, spot, false, preview),
-        HealMode::Poisson => heal_strokes(img, spot, true, preview),
-        HealMode::PatchMatch => heal_patchmatch(img, spot, preview),
+    // 按档位分组，保留首次出现顺序（同档位内保持原始笔画顺序）。
+    let mut groups: Vec<(HealMode, Vec<SpotStroke>)> = Vec::new();
+    for s in &spot.strokes {
+        if let Some(last) = groups.last_mut() {
+            if last.0 == s.mode {
+                last.1.push(*s);
+                continue;
+            }
+        }
+        groups.push((s.mode, vec![*s]));
     }
+    let mut out = img.clone();
+    for (mode, strokes) in &groups {
+        let sub = SpotFix {
+            strokes: strokes.clone(),
+            mode: *mode,
+        };
+        out = match mode {
+            HealMode::Telea => crate::spot::inpaint_rgb_feathered(&out, &sub),
+            HealMode::FreqSep => heal_strokes(&out, &sub, false, preview),
+            HealMode::Poisson => heal_strokes(&out, &sub, true, preview),
+            HealMode::PatchMatch => heal_patchmatch(&out, &sub, preview),
+        };
+    }
+    out
 }
 
 /// 逐笔画顺序愈合：后一笔可基于已愈合的前一笔找源，自然叠加。
@@ -918,7 +943,7 @@ mod tests {
         }
         let mut spot = SpotFix::new();
         spot.mode = mode;
-        spot.add_stroke(0.5, 0.5, 0.07); // 半径约 6.7px，覆盖 8×8 瑕疵
+        spot.add_stroke(0.5, 0.5, 0.07, mode); // 半径约 6.7px，覆盖 8×8 瑕疵
         let out = heal_image(&img, &spot, false);
         let fixed = out.get_pixel(48, 48).0;
         ((fixed[0] as i32 - 200).abs()
@@ -939,7 +964,7 @@ mod tests {
         }
         let mut spot = SpotFix::new();
         spot.mode = HealMode::FreqSep;
-        spot.add_stroke(0.5, 0.5, 0.07);
+        spot.add_stroke(0.5, 0.5, 0.07, HealMode::FreqSep);
         let out = heal_image(&img, &spot, false);
         assert_eq!(out.get_pixel(2, 2).0, [200u8, 180, 160], "角落被误改");
         let _ = DynamicImage::ImageRgb8(out);
@@ -957,7 +982,7 @@ mod tests {
         let img = RgbImage::from_pixel(16, 16, Rgb([120u8, 90, 200]));
         let mut spot = SpotFix::new();
         spot.mode = HealMode::Poisson;
-        spot.add_stroke(0.5, 0.5, 0.2);
+        spot.add_stroke(0.5, 0.5, 0.2, HealMode::Poisson);
         let out = heal_image(&img, &spot, false);
         assert_eq!(out.dimensions(), (16, 16));
     }
@@ -1062,7 +1087,7 @@ mod tests {
         let img = RgbImage::from_pixel(16, 16, Rgb([120u8, 90, 200]));
         let mut spot = SpotFix::new();
         spot.mode = HealMode::PatchMatch;
-        spot.add_stroke(0.5, 0.5, 0.2);
+        spot.add_stroke(0.5, 0.5, 0.2, HealMode::PatchMatch);
         let out = heal_image(&img, &spot, false);
         assert_eq!(out.dimensions(), (16, 16));
     }
@@ -1082,7 +1107,7 @@ mod tests {
         spot.mode = HealMode::PatchMatch;
         // r_norm=0.04 → 64 图上半径≈2.6px，覆盖 2px 宽竖线；沿 y 排布成连续带。
         for y in 0..64 {
-            spot.add_stroke(0.5, y as f32 / 64.0, 0.04);
+            spot.add_stroke(0.5, y as f32 / 64.0, 0.04, HealMode::PatchMatch);
         }
         let out = heal_image(&img, &spot, false);
         let fixed = out.get_pixel(31, 32).0;
@@ -1091,5 +1116,42 @@ mod tests {
             + (fixed[2] as i32 - 160).abs()) as f32;
         assert!(dist < 45.0, "细线未被 PatchMatch 修复（dist={}）", dist);
         assert_eq!(out.get_pixel(2, 2).0, [200u8, 180, 160], "角落被误改");
+    }
+
+    #[test]
+    fn mixed_mode_strokes_heal_independently() {
+        // 同一画面里两笔用不同档位：一笔试 Poisson、一笔试 PatchMatch，
+        // 断言 heal_image 能为混合档位正常愈合且不崩、远处不被误改。
+        // （直接守「切换全局档位不会改写已存在笔」的数据模型前提。）
+        let mut img = RgbImage::from_pixel(96, 96, Rgb([200u8, 180, 160]));
+        for y in 44..52 {
+            for x in 44..52 {
+                img.put_pixel(x, y, Rgb([20u8, 20, 20]));
+            }
+        }
+        for y in 10..18 {
+            for x in 10..18 {
+                img.put_pixel(x, y, Rgb([20u8, 20, 20]));
+            }
+        }
+        let mut spot = SpotFix::new();
+        spot.add_stroke(0.5, 0.5, 0.07, HealMode::Poisson);
+        spot.add_stroke(0.13, 0.13, 0.07, HealMode::PatchMatch);
+        // 独立性前提：两笔档位互不相同。
+        assert_ne!(spot.strokes[0].mode, spot.strokes[1].mode);
+        let out = heal_image(&img, &spot, false);
+        assert_eq!(out.dimensions(), (96, 96));
+        // 远端角落不被误改。
+        assert_eq!(out.get_pixel(90, 90).0, [200u8, 180, 160]);
+        // 两处缺陷中心都应被修复（各自按其档位）。
+        let d1 = dist_to_bg(&out, 48, 48);
+        let d2 = dist_to_bg(&out, 14, 14);
+        assert!(d1 < 60.0, "Poisson 笔未修复（dist={}）", d1);
+        assert!(d2 < 60.0, "PatchMatch 笔未修复（dist={}）", d2);
+    }
+
+    fn dist_to_bg(img: &RgbImage, x: u32, y: u32) -> f32 {
+        let p = img.get_pixel(x, y);
+        ((p[0] as i32 - 200).abs() + (p[1] as i32 - 180).abs() + (p[2] as i32 - 160).abs()) as f32
     }
 }

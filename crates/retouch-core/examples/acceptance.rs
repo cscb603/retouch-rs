@@ -64,7 +64,7 @@ fn main() {
     for t in (0..w as i32).step_by(9) {
         let cx = t as f32 / w as f32;
         let cy = (t as f32 * 0.65 + 30.0) / h as f32;
-        spot.add_stroke(cx, cy, 0.02);
+        spot.add_stroke(cx, cy, 0.02, HealMode::PatchMatch);
     }
 
     // baseline：未修复（dirty）vs clean 在电线区 PSNR（应很低，说明线明显）

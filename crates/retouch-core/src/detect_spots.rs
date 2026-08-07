@@ -12,7 +12,7 @@
 //! **不做什么**（见白皮书 C2/C3）：语义级瑕疵（人、电线杆、皮肤痘印）不做，
 //! 不引入任何 ML/ONNX 依赖。电线是结构化线条易误伤，交由用户手动圈选。
 
-use crate::spot::SpotStroke;
+use crate::spot::{HealMode, SpotStroke};
 use image::RgbImage;
 use rayon::prelude::*;
 
@@ -298,6 +298,7 @@ fn detect_single_scale(img: &RgbImage, params: &DetectParams) -> Vec<(f32, SpotS
                 c.cx_px / w as f32,
                 c.cy_px / h as f32,
                 r_norm * params.radius_scale,
+                HealMode::Poisson,
             ),
         ));
     }
