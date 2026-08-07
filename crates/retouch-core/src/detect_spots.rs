@@ -56,11 +56,14 @@ impl Default for DetectParams {
         Self {
             median_ksize: 13,
             contrast_thr: 25.0,
-            min_radius_px: 1.5,
-            max_radius_px: 40.0,
+            // 最小半径 1.0px：2px 直径灰尘仍值得修；配合孤立性校验不会引入噪声误检。
+            min_radius_px: 1.0,
+            max_radius_px: 28.0,
             min_area: 4,
             isolation_ratio: 0.35,
-            radius_scale: 1.4,
+            // 笔触外扩系数：修复需采样周边做羽化，轻微外扩即可（1.15）。
+            // 旧默认 1.4 会把小污点撑成明显过大的修复圈，易穿帮。
+            radius_scale: 1.15,
             max_spots: 200,
             scales: vec![1],
         }
@@ -76,6 +79,8 @@ struct Candidate {
     miny: usize,
     maxy: usize,
     mean_res: f32,
+    /// 连通域像素数（用于等效圆半径，比外接矩形半边长更紧凑，避免长条污点撑成大圈）。
+    area: u32,
 }
 
 /// 自动检测孤立小污点（传感器灰尘 / 亮斑 / 暗点），返回归一化笔触列表。
@@ -265,6 +270,7 @@ fn detect_single_scale(img: &RgbImage, params: &DetectParams) -> Vec<(f32, SpotS
                 miny,
                 maxy,
                 mean_res: sres / cnt as f32,
+                area: cnt,
             });
         }
     }
@@ -277,9 +283,9 @@ fn detect_single_scale(img: &RgbImage, params: &DetectParams) -> Vec<(f32, SpotS
 
     let mut kept: Vec<(f32, SpotStroke)> = Vec::new();
     for c in &candidates {
-        let bw = (c.maxx - c.minx + 1) as f32;
-        let bh = (c.maxy - c.miny + 1) as f32;
-        let radius_px = (bw.max(bh) / 2.0).max(1.0);
+        // 用等效圆半径 sqrt(area/π)，比「外接矩形半边长」紧凑得多：
+        // 长条/椭圆污点不再被拉成大圆，避免修复圈过大穿帮。
+        let radius_px = ((c.area as f32 / std::f32::consts::PI).sqrt()).max(1.0);
         let r_norm = radius_px / short;
         if r_norm < r_min_norm || r_norm > r_max_norm {
             continue;

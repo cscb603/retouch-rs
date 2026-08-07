@@ -187,6 +187,9 @@ struct RetouchApp {
     /// 默认 false，贴合 PS「先选区、点『应用修复』才修」的心智模型；
     /// 无论开关如何，保存/导出都按全分辨率愈合，结果一致。
     spot_live: bool,
+    /// 是否在画布上显示选区标注（污点圆圈）。默认 true 便于编辑；
+    /// 取消勾选则只看修复结果、不显示任何辅助圆圈。
+    show_spot_marks: bool,
     /// 自动检测灵敏度（DetectParams.contrast_thr）：越低越灵敏（云天易误检）、越高越保守。
     detect_sensitivity: f32,
 
@@ -475,6 +478,7 @@ impl RetouchApp {
             beauty_strength: 0.5,
             heal_mode: HealMode::Poisson,
             spot_live: false,
+            show_spot_marks: true,
             detect_sensitivity: 25.0,
             import_rx: None,
             import_base_adj: Adjustments::photo_default(),
@@ -2295,6 +2299,9 @@ impl RetouchApp {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.spot_live, "实时预览修复")
                         .on_hover_text("开=选区一标出就立刻愈合预览；关=只显示红圈选区，点「应用修复」才愈合（默认关，贴合 PS）");
+                    // 显示/隐藏选区圆圈：勾选看标注，取消勾选只看修复结果。
+                    ui.checkbox(&mut self.show_spot_marks, "显示选区标注")
+                        .on_hover_text("取消勾选则画布不再显示任何污点圆圈，只看修复后的结果；编辑时勾上方便定位");
                     let n = self.spot.as_ref().map_or(0, |s| s.strokes.len());
                     ui.label(egui::RichText::new(format!("已标记 {} 处", n)).weak().size(12.0));
                 });
@@ -3393,7 +3400,8 @@ impl RetouchApp {
 
         // 常驻选区标记：把所有已标污点画成圆圈，让「选区」始终可见——
         // 红圈=待修复(未愈合)，绿圈=已应用修复。即便预览已愈合也能看清修过哪里。
-        if self.tool_mode == ToolMode::Spot {
+        // 可用「显示选区标注」开关整体隐藏（只看结果）。中心点不绘制，避免遮挡修复效果。
+        if self.show_spot_marks && self.tool_mode == ToolMode::Spot {
             if let Some(spot) = &self.spot {
                 let side = image_rect.width().min(image_rect.height());
                 let col = if self.spot_live {
@@ -3409,12 +3417,6 @@ impl RetouchApp {
                     let rad = (s.r_norm * side).max(3.0);
                     ui.painter()
                         .circle_stroke(center, rad, egui::Stroke::new(2.0, col));
-                    // 中心点按「本笔各自档位」着色：一眼看清每张污点用的是哪种算法。
-                    ui.painter().circle_filled(
-                        center,
-                        (rad * 0.28).clamp(2.0, 5.0),
-                        Self::mode_color(s.mode),
-                    );
                 }
             }
         }
@@ -3422,16 +3424,6 @@ impl RetouchApp {
         // Hint overlay.
         if resp.hovered() && self.tool_mode == ToolMode::Adjust {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
-        }
-    }
-
-    /// 把修复档位映射到一个醒目的标识色，用于在画布中心小点上区分每笔各自的算法。
-    fn mode_color(mode: HealMode) -> egui::Color32 {
-        match mode {
-            HealMode::Telea => egui::Color32::from_rgb(150, 150, 150), // 灰：传统
-            HealMode::FreqSep => egui::Color32::from_rgb(90, 150, 255), // 蓝：自然
-            HealMode::Poisson => egui::Color32::from_rgb(255, 160, 60), // 橙：精修
-            HealMode::PatchMatch => egui::Color32::from_rgb(200, 100, 255), // 紫：内容感知
         }
     }
 
