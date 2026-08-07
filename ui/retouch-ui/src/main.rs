@@ -182,6 +182,13 @@ struct RetouchApp {
     beauty_strength: f32,
     /// 污点修复算法档位（默认 Poisson 精修），存入 SpotFix 随图持久化。
     heal_mode: HealMode,
+    /// 污点修复「实时预览愈合」开关：
+    /// false = 只显示选区（红圈），图像不愈合；true = 预览即愈合（绿圈）。
+    /// 默认 false，贴合 PS「先选区、点『应用修复』才修」的心智模型；
+    /// 无论开关如何，保存/导出都按全分辨率愈合，结果一致。
+    spot_live: bool,
+    /// 自动检测灵敏度（DetectParams.contrast_thr）：越低越灵敏（云天易误检）、越高越保守。
+    detect_sensitivity: f32,
 
     // ── v0.6.3 响应性：把重解码全部移出主线程，界面不再冻结 ──
     /// 后台导入通道（Some=正在导入）。缩略图解码在线程里做，主线程流式追加。
@@ -467,6 +474,8 @@ impl RetouchApp {
             spot_brush: 12,
             beauty_strength: 0.5,
             heal_mode: HealMode::Poisson,
+            spot_live: false,
+            detect_sensitivity: 25.0,
             import_rx: None,
             import_base_adj: Adjustments::photo_default(),
             import_total: 0,
@@ -1401,6 +1410,7 @@ impl RetouchApp {
             // 同步档位显示：取该图污点层的算法档位（无污点则用当前默认）。
             self.heal_mode = slot.spot.as_ref().map_or(self.heal_mode, |s| s.mode);
             self.last_title = slot.title.clone();
+            self.spot_live = false; // 切图回到「只显示选区」视图
             // 清后台修图状态。
             self.auto_running = false;
             if let Ok(mut guard) = self.auto_result.lock() {
@@ -1460,6 +1470,7 @@ impl RetouchApp {
                             self.base_rgba = None;
                             self.before_rgba = None;
                             self.dirty_geo = false;
+                            self.spot_live = false; // 新图回到「只显示选区」视图
                             self.status = format!("已打开 {}", msg.path.display());
                         }
                         Err(e) => {
@@ -2183,16 +2194,19 @@ impl RetouchApp {
                         match (&self.base_rgba, self.base_size) {
                             (Some(rgba), [bw, bh]) if bw > 0 && bh > 0 => {
                                 let t0 = std::time::Instant::now();
+                                let mut dp =
+                                    retouch_core::detect_spots::DetectParams::default();
+                                dp.contrast_thr = self.detect_sensitivity;
                                 let strokes = retouch_core::detect_spots::detect_spots_from_rgb(
                                     rgba,
                                     bw as u32,
                                     bh as u32,
-                                    &retouch_core::detect_spots::DetectParams::default(),
+                                    &dp,
                                 );
                                 let ms = t0.elapsed().as_millis();
                                 if strokes.is_empty() {
                                     self.status = format!(
-                                        "未检测到明显污点（{}ms）——画面较干净，或瑕疵偏大/贴近纹理，请手动圈选",
+                                        "未检测到明显污点（{}ms）——画面较干净，或瑕疵偏大/贴近纹理；可调高灵敏度或手动圈选",
                                         ms
                                     );
                                 } else {
@@ -2207,9 +2221,12 @@ impl RetouchApp {
                                     for s in strokes {
                                         spot.add_auto_stroke(s.cx, s.cy, s.r_norm);
                                     }
+                                    // 回到「只显示选区」视图：先让用户看到红圈选区，
+                                    // 再点「应用修复」才在预览里真正愈合（贴合 PS 心智）。
+                                    self.spot_live = false;
                                     self.dirty_geo = true;
                                     self.status = format!(
-                                        "自动检测到 {} 处污点并已加入修复笔触（{}ms）；点「保存」或「导出」才实际修掉",
+                                        "已生成 {} 处选区（红圈，{}ms）。点「应用修复」查看修复效果；误检多可调高灵敏度",
                                         n, ms
                                     );
                                 }
@@ -2217,13 +2234,57 @@ impl RetouchApp {
                             _ => self.status = "请先打开图片".into(),
                         }
                     }
-                    ui.label("（仅生成选区；保存/导出时真正修复）");
+                    ui.label("（仅生成选区，不立即修复）");
+                });
+                // 应用修复 / 撤销应用：PS 心智——选区出来后，点「应用修复」才在预览里真正愈合。
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("✅ 应用修复")
+                        .on_hover_text("把当前选区（红圈）真正愈合并显示修复结果；绿圈=已修复。保存/导出为全分辨率最终结果")
+                        .clicked()
+                    {
+                        match &self.spot {
+                            Some(spot) if !spot.is_empty() => {
+                                let n = spot.strokes.len();
+                                self.spot_live = true;
+                                self.dirty_geo = true;
+                                self.status = format!(
+                                    "已应用修复 {} 处（预览愈合，绿圈）；保存/导出为全分辨率结果",
+                                    n
+                                );
+                            }
+                            _ => self.status = "没有可修复的选区，先「自动检测」或手动圈选".into(),
+                        }
+                    }
+                    if ui
+                        .button("↩ 撤销应用")
+                        .on_hover_text("退回「只显示选区」视图（红圈），本次愈合预览撤销，可重新应用或微调")
+                        .clicked()
+                    {
+                        self.spot_live = false;
+                        self.dirty_geo = true;
+                        self.status = "已退回选区视图（未修复）；可重新「应用修复」或手动增删".into();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.spot_live, "实时预览修复")
+                        .on_hover_text("开=选区一标出就立刻愈合预览；关=只显示红圈选区，点「应用修复」才愈合（默认关，贴合 PS）");
+                    let n = self.spot.as_ref().map_or(0, |s| s.strokes.len());
+                    ui.label(egui::RichText::new(format!("已标记 {} 处", n)).weak().size(12.0));
                 });
                 ui.label(
-                    egui::RichText::new("提示：先点「自动检测」生成选区，再点「保存」或「导出」完成修复")
+                    egui::RichText::new("流程：自动检测/手动画笔 → 选区(红圈) → 点「应用修复」看效果 → 保存/导出")
                         .weak()
                         .size(11.0),
                 );
+                ui.horizontal(|ui| {
+                    ui.label("灵敏度");
+                    ui.add(
+                        egui::Slider::new(&mut self.detect_sensitivity, 8.0..=60.0)
+                            .suffix(" 阈值"),
+                    )
+                    .on_hover_text("自动检测灵敏度：阈值越低越灵敏（云天易误检）、越高越保守（可能漏检）。误检多就调高");
+                });
                 ui.horizontal(|ui| {
                     ui.label("笔刷");
                     ui.add(egui::Slider::new(&mut self.spot_brush, 2..=50).suffix(" px"))
@@ -2254,12 +2315,6 @@ impl RetouchApp {
                         self.dirty_geo = true;
                     }
                 });
-                let n = self.spot.as_ref().map_or(0, |s| s.strokes.len());
-                ui.label(
-                    egui::RichText::new(format!("已标记 {} 处", n))
-                        .weak()
-                        .size(12.0),
-                );
             });
             ui.separator();
         }
@@ -3310,6 +3365,28 @@ impl RetouchApp {
             );
         }
 
+        // 常驻选区标记：把所有已标污点画成圆圈，让「选区」始终可见——
+        // 红圈=待修复(未愈合)，绿圈=已应用修复。即便预览已愈合也能看清修过哪里。
+        if self.tool_mode == ToolMode::Spot {
+            if let Some(spot) = &self.spot {
+                let side = image_rect.width().min(image_rect.height());
+                let col = if self.spot_live {
+                    egui::Color32::from_rgb(80, 220, 120)
+                } else {
+                    egui::Color32::from_rgb(255, 90, 90)
+                };
+                for s in &spot.strokes {
+                    let center = egui::pos2(
+                        image_rect.min.x + s.cx * image_rect.width(),
+                        image_rect.min.y + s.cy * image_rect.height(),
+                    );
+                    let rad = (s.r_norm * side).max(3.0);
+                    ui.painter()
+                        .circle_stroke(center, rad, egui::Stroke::new(2.0, col));
+                }
+            }
+        }
+
         // Hint overlay.
         if resp.hovered() && self.tool_mode == ToolMode::Adjust {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
@@ -3340,10 +3417,16 @@ impl RetouchApp {
         }
         // v0.6 污点修复：在「几何之后」的最终预览图上 inpaint（坐标即显示坐标，
         // 无需反解几何，所见即所得）。与导出 export_image 的施加点完全一致。
-        let out_rgb = if let Some(spot) = &self.spot {
-            if !spot.is_empty() {
-                // 预览走 preview=true（Poisson 降到 80 迭代，交互流畅）
-                spot.heal(&out_rgb, true)
+        // 受 spot_live 开关控制：默认 false 时只显示选区(红圈)、不愈合，
+        // 点「应用修复」才预览愈合（绿圈）；保存/导出始终全分辨率愈合，结果一致。
+        let out_rgb = if self.spot_live {
+            if let Some(spot) = &self.spot {
+                if !spot.is_empty() {
+                    // 预览走 preview=true（Poisson 降到 80 迭代，交互流畅）
+                    spot.heal(&out_rgb, true)
+                } else {
+                    out_rgb
+                }
             } else {
                 out_rgb
             }
