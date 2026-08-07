@@ -313,10 +313,7 @@ mod tests {
         assert_eq!(spot.strokes.len(), 2);
         assert!(!spot.strokes[0].is_auto);
         assert!(!spot.strokes[1].is_auto);
-        assert!(
-            (spot.strokes[0].cx - 0.1).abs() < 1e-4
-                && (spot.strokes[1].cx - 0.4).abs() < 1e-4
-        );
+        assert!((spot.strokes[0].cx - 0.1).abs() < 1e-4 && (spot.strokes[1].cx - 0.4).abs() < 1e-4);
     }
 
     #[test]

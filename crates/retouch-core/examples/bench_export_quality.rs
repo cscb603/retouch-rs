@@ -17,10 +17,10 @@ fn synth_color_edges(w: u32, h: u32) -> RgbImage {
             let stripe = (x / 3) % 2 == 0;
             let diag = (x + y) % 160 < 80;
             let c = match (stripe, diag) {
-                (true, true) => [220u8, 20, 30],   // 红
-                (false, true) => [20, 40, 210],    // 蓝
-                (true, false) => [210, 20, 190],   // 洋红
-                (false, false) => [20, 200, 190],  // 青
+                (true, true) => [220u8, 20, 30],  // 红
+                (false, true) => [20, 40, 210],   // 蓝
+                (true, false) => [210, 20, 190],  // 洋红
+                (false, false) => [20, 200, 190], // 青
             };
             img.put_pixel(x, y, Rgb(c));
         }
@@ -72,7 +72,9 @@ fn encode(img: &RgbImage, q: u8, sub: Subsampling) -> Vec<u8> {
 }
 
 fn decode(bytes: &[u8]) -> RgbImage {
-    image::load_from_memory(bytes).expect("decode failed").to_rgb8()
+    image::load_from_memory(bytes)
+        .expect("decode failed")
+        .to_rgb8()
 }
 
 fn run_case(name: &str, img: &RgbImage) {
@@ -108,7 +110,10 @@ fn run_case(name: &str, img: &RgbImage) {
 
 fn main() {
     println!("=== v0.6.6 导出画质验证：S444 vs 4:2:0 ===\n");
-    run_case("高饱和彩色边缘（合成，最坏情况）", &synth_color_edges(1200, 800));
+    run_case(
+        "高饱和彩色边缘（合成，最坏情况）",
+        &synth_color_edges(1200, 800),
+    );
     run_case("肤色平滑渐变（合成，人像常见）", &synth_skin(1200, 800));
 
     // 实拍照片：合成图是极端情况，真实体积代价必须用实拍数据说话
@@ -117,9 +122,18 @@ fn main() {
             Ok(im) => {
                 let rgb = im.to_rgb8();
                 let (w, h) = rgb.dimensions();
-                run_case(&format!("实拍 {} ({}×{})", 
-                    std::path::Path::new(&p).file_name().unwrap_or_default().to_string_lossy(),
-                    w, h), &rgb);
+                run_case(
+                    &format!(
+                        "实拍 {} ({}×{})",
+                        std::path::Path::new(&p)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
+                        w,
+                        h
+                    ),
+                    &rgb,
+                );
             }
             Err(e) => println!("跳过 {}：{}\n", p, e),
         }

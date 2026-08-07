@@ -201,17 +201,14 @@ fn detect_single_scale(img: &RgbImage, params: &DetectParams) -> Vec<(f32, SpotS
     // 2. 残差：最大通道 abs 差（突出异色孤立点）
     let src = img.as_raw();
     let mut residual = vec![0f32; n];
-    residual
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, r)| {
-            let p = &src[i * 3..i * 3 + 3];
-            let m = med[i];
-            *r = (p[0] as f32 - m[0] as f32)
-                .abs()
-                .max((p[1] as f32 - m[1] as f32).abs())
-                .max((p[2] as f32 - m[2] as f32).abs());
-        });
+    residual.par_iter_mut().enumerate().for_each(|(i, r)| {
+        let p = &src[i * 3..i * 3 + 3];
+        let m = med[i];
+        *r = (p[0] as f32 - m[0] as f32)
+            .abs()
+            .max((p[1] as f32 - m[1] as f32).abs())
+            .max((p[2] as f32 - m[2] as f32).abs());
+    });
 
     // 3. 二值化
     let bin: Vec<bool> = residual.iter().map(|&r| r > params.contrast_thr).collect();
@@ -597,11 +594,7 @@ mod tests {
                 img.put_pixel(
                     x,
                     y,
-                    Rgb([
-                        (seed >> 24) as u8,
-                        (seed >> 16) as u8,
-                        (seed >> 8) as u8,
-                    ]),
+                    Rgb([(seed >> 24) as u8, (seed >> 16) as u8, (seed >> 8) as u8]),
                 );
             }
         }
@@ -611,8 +604,7 @@ mod tests {
             assert_eq!(fast.len(), slow.len());
             for (i, (f, s)) in fast.iter().zip(slow.iter()).enumerate() {
                 assert_eq!(
-                    f,
-                    s,
+                    f, s,
                     "ksize={} 第 {} 像素不一致：Huang={:?} 朴素={:?}",
                     ks, i, f, s
                 );

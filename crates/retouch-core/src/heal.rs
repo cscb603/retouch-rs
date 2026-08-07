@@ -13,6 +13,10 @@
 use crate::spot::{inpaint_rgb, HealMode, SpotFix, SpotStroke};
 use image::{GenericImageView, GrayImage, Rgb, RgbImage};
 
+/// 判定两笔「属于同一片」的间距系数：中心距 ≤ (r_a + r_b) × 此系数即视为相连。
+/// 1.5 能把拖笔画出的连续细线归为一簇，又不会把相距几十像素的独立灰尘粘在一起。
+const CLUSTER_GAP_FACTOR: f32 = 1.5;
+
 /// 对整张 RGB 图施加一组污点笔画的修复（**按每笔各自的档位**分派）。空笔画 = 恒等。
 ///
 /// 关键语义：每笔 `SpotStroke.mode` 独立生效，切换全局档位不会改写已存在笔的档位，
@@ -49,25 +53,132 @@ pub fn heal_image(img: &RgbImage, spot: &SpotFix, preview: bool) -> RgbImage {
             HealMode::Telea => crate::spot::inpaint_rgb_feathered(&out, &sub),
             HealMode::FreqSep => heal_strokes(&out, &sub, false, preview),
             HealMode::Poisson => heal_strokes(&out, &sub, true, preview),
-            HealMode::PatchMatch => heal_patchmatch(&out, &sub, preview),
+            // PatchMatch 走「所有笔画的并集 bbox」。若笔多且分散（例如自动检测出
+            // 上百处灰尘），并集会膨胀到接近整图，而 PatchMatch 成本 ∝ bbox 面积 →
+            // 全分辨率导出可能卡到不可用。这里先按空间邻近分簇：连成片的（拖笔
+            // 细线/电线）仍一次并集填充以保证连续性，彼此独立的各簇分别处理，
+            // 总成本与图像尺寸解耦。
+            HealMode::PatchMatch => {
+                let (iw, ih) = out.dimensions();
+                let clusters = cluster_strokes(strokes, iw, ih);
+                if clusters.len() <= 1 {
+                    heal_patchmatch(&out, &sub, preview)
+                } else {
+                    let mut acc = out;
+                    for c in clusters {
+                        let part = SpotFix {
+                            strokes: c,
+                            mode: *mode,
+                        };
+                        acc = heal_patchmatch(&acc, &part, preview);
+                    }
+                    acc
+                }
+            }
         };
     }
     out
 }
 
+/// 笔画像素半径上限：随图像短边缩放。
+///
+/// **为什么不能写死 60px**：笔画半径是「占短边比例」，预览图短边约 900px、
+/// 导出全分辨率短边可达 4000px+。写死 60px 会让导出时的修复范围被截断到
+/// 短边的 1.5%，而预览是 5%（手动最大笔刷 r_norm=0.05）——预览看着修干净了、
+/// 导出却残留一圈，即「所见 ≠ 所得」。
+/// 下限保持 60px 以保证小图/预览行为与旧版完全一致（不回归），
+/// 上限 200px 封顶防 Poisson 成本（∝ r²·iters）爆炸。
+#[inline]
+fn max_radius_px(short_side: f32) -> f32 {
+    (short_side * 0.05).clamp(60.0, 200.0)
+}
+
+/// 按空间邻近把笔画分簇（并查集，O(n²)，n ≤ 200 可忽略）。
+///
+/// 同簇条件：两笔中心像素距离 ≤ (r_a + r_b) × [`CLUSTER_GAP_FACTOR`]。
+/// - 沿细线拖出的一串笔 → 归为一簇，交给 PatchMatch 一次并集填充（保证线连续）。
+/// - 满画面分散的独立灰尘 → 各自成簇，避免并集 bbox 膨胀成整图。
+fn cluster_strokes(strokes: &[SpotStroke], w: u32, h: u32) -> Vec<Vec<SpotStroke>> {
+    let n = strokes.len();
+    if n <= 1 {
+        return vec![strokes.to_vec()];
+    }
+    let short = w.min(h) as f32;
+    let cap = max_radius_px(short);
+    let pxs: Vec<(f32, f32, f32)> = strokes
+        .iter()
+        .map(|s| {
+            (
+                s.cx * w as f32,
+                s.cy * h as f32,
+                (s.r_norm * short).clamp(1.0, cap),
+            )
+        })
+        .collect();
+
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn root(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]]; // 路径压缩
+            x = parent[x];
+        }
+        x
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (xi, yi, ri) = pxs[i];
+            let (xj, yj, rj) = pxs[j];
+            let d2 = (xi - xj).powi(2) + (yi - yj).powi(2);
+            let lim = (ri + rj) * CLUSTER_GAP_FACTOR;
+            if d2 <= lim * lim {
+                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                if a != b {
+                    parent[a] = b;
+                }
+            }
+        }
+    }
+    // 按簇根聚合，保持笔画原始顺序（同簇内先后关系不变）。
+    let mut order: Vec<usize> = Vec::new();
+    let mut buckets: std::collections::HashMap<usize, Vec<SpotStroke>> =
+        std::collections::HashMap::new();
+    for (i, s) in strokes.iter().enumerate() {
+        let r = root(&mut parent, i);
+        buckets.entry(r).or_insert_with(|| {
+            order.push(r);
+            Vec::new()
+        });
+        if let Some(v) = buckets.get_mut(&r) {
+            v.push(*s);
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|r| buckets.remove(&r))
+        .collect()
+}
+
 /// 逐笔画顺序愈合：后一笔可基于已愈合的前一笔找源，自然叠加。
 fn heal_strokes(img: &RgbImage, spot: &SpotFix, poisson: bool, preview: bool) -> RgbImage {
     // 预览降迭代：80 次在下采样预览图上足够收敛且流畅；导出用满 250 次。
-    let iters: u32 = if preview { 80 } else { 250 };
+    let base_iters: u32 = if preview { 80 } else { 250 };
     let mut out = img.clone();
     for s in &spot.strokes {
         let (w, h) = out.dimensions();
+        let short = w.min(h) as f32;
         let cx = (s.cx * w as f32).round().clamp(0.0, (w - 1) as f32) as i32;
         let cy = (s.cy * h as f32).round().clamp(0.0, (h - 1) as f32) as i32;
-        let r = (s.r_norm * (w.min(h)) as f32).clamp(1.0, 60.0).round() as i32;
+        let r = (s.r_norm * short).clamp(1.0, max_radius_px(short)).round() as i32;
         if r < 1 {
             continue;
         }
+        // 大半径按等成本原则下调迭代（Poisson 成本 ∝ r²·iters），
+        // 保底 1/4 基准次数，保证大块也能收敛到肉眼无缝。
+        let iters = if r > 60 {
+            ((base_iters as f32 * 60.0 / r as f32).round() as u32).max(base_iters / 4)
+        } else {
+            base_iters
+        };
         // 找源块（PatchMatch 全局+边缘感知）；找不到 → 退化为 Telea 局部兜底（仅此笔画）。
         let (pm_iters, pm_step) = if preview {
             (4u32, (r / 2).max(3))
@@ -529,10 +640,12 @@ pub fn heal_patchmatch(img: &RgbImage, spot: &SpotFix, preview: bool) -> RgbImag
     // 解析所有笔画为图像坐标 (cx, cy, r)；r<1 跳过。
     let mut strokes: Vec<(i32, i32, i32)> = Vec::with_capacity(spot.strokes.len());
     let mut max_r = 1i32;
+    let short = w.min(h) as f32;
+    let r_cap = max_radius_px(short);
     for s in &spot.strokes {
         let cx = (s.cx * w as f32).round().clamp(0.0, (w - 1) as f32) as i32;
         let cy = (s.cy * h as f32).round().clamp(0.0, (h - 1) as f32) as i32;
-        let r = (s.r_norm * (w.min(h)) as f32).clamp(1.0, 60.0).round() as i32;
+        let r = (s.r_norm * short).clamp(1.0, r_cap).round() as i32;
         if r < 1 {
             continue;
         }
@@ -543,7 +656,8 @@ pub fn heal_patchmatch(img: &RgbImage, spot: &SpotFix, preview: bool) -> RgbImag
         return img.clone();
     }
     // 并集 bbox（含上下文 padding，给 PatchMatch 足够可抄纹理）。
-    let pad = (max_r * 3).clamp(24, 96);
+    // 上限随半径放宽到 160：大笔刷（全分辨率下 r 可到 200）需要更宽的可抄区域。
+    let pad = (max_r * 3).clamp(24, 160);
     let mut minx = w;
     let mut miny = h;
     let mut maxx = 0;
@@ -647,10 +761,18 @@ fn patchmatch_fill(img: &mut RgbImage, mask: &GrayImage, patch_r: i32, inner_ite
     for y in 0..h {
         for x in 0..w {
             if !known[idx(x, y)] {
-                if x < min_x { min_x = x; }
-                if y < min_y { min_y = y; }
-                if x > max_x { max_x = x; }
-                if y > max_y { max_y = y; }
+                if x < min_x {
+                    min_x = x;
+                }
+                if y < min_y {
+                    min_y = y;
+                }
+                if x > max_x {
+                    max_x = x;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
             }
         }
     }
@@ -1153,5 +1275,109 @@ mod tests {
     fn dist_to_bg(img: &RgbImage, x: u32, y: u32) -> f32 {
         let p = img.get_pixel(x, y);
         ((p[0] as i32 - 200).abs() + (p[1] as i32 - 180).abs() + (p[2] as i32 - 160).abs()) as f32
+    }
+
+    #[test]
+    fn radius_cap_scales_with_short_side() {
+        // 小图/预览：保持旧行为 60px（不回归）。
+        assert_eq!(max_radius_px(600.0), 60.0);
+        assert_eq!(max_radius_px(933.0), 60.0); // 典型预览短边
+                                                // 中等：按短边 5% 线性放大。
+        assert_eq!(max_radius_px(1400.0), 70.0);
+        assert_eq!(max_radius_px(3000.0), 150.0);
+        // 全分辨率：封顶 200，防 Poisson 成本爆炸。
+        assert_eq!(max_radius_px(4000.0), 200.0);
+        assert_eq!(max_radius_px(8000.0), 200.0);
+    }
+
+    #[test]
+    fn big_image_large_brush_is_not_truncated() {
+        // 回归护栏：手动最大笔刷 r_norm=0.05，在短边 1400 的图上应按 70px 生效。
+        // 旧实现写死 clamp(1,60) → 距中心 62px 处的缺陷不会被修 → 导出残留一圈。
+        let n = 1400u32;
+        let mut img = RgbImage::from_pixel(n, n, Rgb([200u8, 180, 160]));
+        for y in 0..n {
+            for x in 0..n {
+                let k = ((x * 13 + y * 7) % 17) as i32 - 8;
+                let v = img.get_pixel(x, y);
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgb([
+                        (v[0] as i32 + k).clamp(0, 255) as u8,
+                        (v[1] as i32 + k).clamp(0, 255) as u8,
+                        (v[2] as i32 + k).clamp(0, 255) as u8,
+                    ]),
+                );
+            }
+        }
+        // 半径 64px 的圆形缺陷（比旧上限 60 大，用来暴露截断）。
+        let (cx, cy) = (700i32, 700i32);
+        for y in (cy - 64)..=(cy + 64) {
+            for x in (cx - 64)..=(cx + 64) {
+                let (dx, dy) = (x - cx, y - cy);
+                if dx * dx + dy * dy <= 64 * 64 {
+                    img.put_pixel(x as u32, y as u32, Rgb([20u8, 20, 20]));
+                }
+            }
+        }
+        let mut spot = SpotFix::new();
+        spot.add_stroke(0.5, 0.5, 0.05, HealMode::FreqSep); // 0.05*1400 = 70px
+        let out = heal_image(&img, &spot, true);
+        assert_eq!(out.dimensions(), (n, n));
+        // 距中心 62px 的环带（旧实现修不到）应已被修复到背景附近。
+        let d_edge = dist_to_bg(&out, (cx + 62) as u32, cy as u32);
+        assert!(d_edge < 90.0, "大笔刷外缘未被修复（dist={}）", d_edge);
+        // 远端不受影响。
+        assert!(dist_to_bg(&out, 20, 20) < 40.0, "远端被误改");
+    }
+
+    #[test]
+    fn patchmatch_many_strokes_uses_per_stroke_path() {
+        // 超过 PATCHMATCH_UNION_MAX 时走逐笔路径：不 panic、尺寸不变、缺陷被修。
+        let n = 240u32;
+        let mut img = RgbImage::from_pixel(n, n, Rgb([200u8, 180, 160]));
+        for y in 0..n {
+            for x in 0..n {
+                let k = ((x * 11 + y * 5) % 13) as i32 - 6;
+                let v = img.get_pixel(x, y);
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgb([
+                        (v[0] as i32 + k).clamp(0, 255) as u8,
+                        (v[1] as i32 + k).clamp(0, 255) as u8,
+                        (v[2] as i32 + k).clamp(0, 255) as u8,
+                    ]),
+                );
+            }
+        }
+        // 12 处分散的小缺陷（对角线铺开 → 并集 bbox ≈ 整图，正是要规避的情形）。
+        let mut spot = SpotFix::new();
+        let mut centers = Vec::new();
+        for i in 0..12u32 {
+            let cx = 20 + i * 18;
+            let cy = 20 + i * 18;
+            for y in (cy - 3)..=(cy + 3) {
+                for x in (cx - 3)..=(cx + 3) {
+                    img.put_pixel(x, y, Rgb([20u8, 20, 20]));
+                }
+            }
+            centers.push((cx, cy));
+            spot.add_stroke(
+                cx as f32 / n as f32,
+                cy as f32 / n as f32,
+                0.025,
+                HealMode::PatchMatch,
+            );
+        }
+        // 12 处彼此远离（间距 ≈25px > (6+6)×1.5）→ 应被分成 12 簇，各自独立处理。
+        assert_eq!(cluster_strokes(&spot.strokes, n, n).len(), 12);
+        let out = heal_image(&img, &spot, true);
+        assert_eq!(out.dimensions(), (n, n));
+        for (cx, cy) in centers {
+            let d = dist_to_bg(&out, cx, cy);
+            assert!(d < 90.0, "第 ({},{}) 处缺陷未修复（dist={}）", cx, cy, d);
+        }
     }
 }

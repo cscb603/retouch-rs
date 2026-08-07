@@ -1392,6 +1392,23 @@ impl RetouchApp {
         }
     }
 
+    /// 把当前工作副本（参数 / 污点 / 作品名）落回活跃 slot。
+    ///
+    /// 工作副本只在切图时写回 slot，所以任何「直接读 slot 状态」的批量操作
+    /// （批量导出等）都必须先调用它，否则当前正在编辑这张的最新改动会丢失。
+    fn sync_active_slot(&mut self) {
+        let (adj, spot, title) = (
+            self.adj.clone(),
+            self.spot.clone(),
+            self.last_title.clone(),
+        );
+        if let Some(slot) = self.album.slots.get_mut(self.album.active_idx) {
+            slot.adj = adj;
+            slot.spot = spot;
+            slot.title = title;
+        }
+    }
+
     /// 保存当前工作副本到「原活跃 slot」，载入目标 slot 到工作副本
     /// （参数/污点/作品名各自独立）。这是相册「逐张独立 + 切换沿用上一张」的核心。
     fn switch_to(&mut self, idx: usize) {
@@ -1400,11 +1417,7 @@ impl RetouchApp {
         }
         let idx = idx.min(self.album.slots.len() - 1);
         // 1) 落回当前工作副本到原 slot。
-        if let Some(slot) = self.album.slots.get_mut(self.album.active_idx) {
-            slot.adj = self.adj.clone();
-            slot.spot = self.spot.clone();
-            slot.title = self.last_title.clone();
-        }
+        self.sync_active_slot();
         self.album.active_idx = idx;
         // 2) 载入目标 slot 到工作副本（参数/污点等轻量状态瞬时切换）。
         if let Some(slot) = self.album.slots.get(idx) {
@@ -1415,7 +1428,7 @@ impl RetouchApp {
             self.heal_mode = slot.spot.as_ref().map_or(self.heal_mode, |s| s.mode);
             self.last_title = slot.title.clone();
             self.spot_live = false; // 切图回到「只显示选区」视图
-            // 清后台修图状态。
+                                    // 清后台修图状态。
             self.auto_running = false;
             if let Ok(mut guard) = self.auto_result.lock() {
                 *guard = None;
@@ -1515,6 +1528,9 @@ impl RetouchApp {
             self.status = "正在导出，请稍候…".into();
             return;
         }
+        // 先把当前工作副本落回活跃 slot：否则「刚调完这张就直接批量导出」时，
+        // 本张导出的会是上次切图时的旧参数/旧污点（改动只在切图时写回 slot）。
+        self.sync_active_slot();
         let cfg = self.export_cfg.clone();
         let ext = cfg.output_format.ext().to_string();
         // 主线程预生成 job（含去重文件名），把重活（解码/导出/写盘）交给后台线程。
@@ -2225,9 +2241,10 @@ impl RetouchApp {
                         match (&self.base_rgba, self.base_size) {
                             (Some(rgba), [bw, bh]) if bw > 0 && bh > 0 => {
                                 let t0 = std::time::Instant::now();
-                                let mut dp =
-                                    retouch_core::detect_spots::DetectParams::default();
-                                dp.contrast_thr = self.detect_sensitivity;
+                                let dp = retouch_core::detect_spots::DetectParams {
+                                    contrast_thr: self.detect_sensitivity,
+                                    ..Default::default()
+                                };
                                 let strokes = retouch_core::detect_spots::detect_spots_from_rgb(
                                     rgba,
                                     bw as u32,
@@ -3235,7 +3252,7 @@ impl RetouchApp {
                     // 拖动/点按都累积笔画（去重：与上一笔间距足够才落点，避免重复）。
                     if dragging || clicked {
                         let add = match &self.spot {
-                            Some(s) => s.strokes.last().map_or(true, |last| {
+                            Some(s) => s.strokes.last().is_none_or(|last| {
                                 let dx = last.cx - cx;
                                 let dy = last.cy - cy;
                                 (dx * dx + dy * dy).sqrt() > r_norm * 0.5

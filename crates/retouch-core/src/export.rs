@@ -13,9 +13,9 @@ use crate::geometry::{apply_geometry, Geometry};
 use crate::pipeline::{render, Adjustments};
 use crate::sharpen;
 use crate::spot::SpotFix;
+use fast_image_resize as fr;
 use image::{imageops, DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgba};
 use mozjpeg_rs::{Encoder as MozEncoder, QuantTableIdx, Subsampling};
-use fast_image_resize as fr;
 use std::io::Cursor;
 use std::path::Path;
 
@@ -231,7 +231,8 @@ fn smart_downscale(img: &DynamicImage, max_long_edge: u32) -> DynamicImage {
     let nh = (h as f32 * scale).round().max(1.0) as u32;
 
     let rgba = img.to_rgba8();
-    let src_image = match fr::images::Image::from_vec_u8(w, h, rgba.into_raw(), fr::PixelType::U8x4) {
+    let src_image = match fr::images::Image::from_vec_u8(w, h, rgba.into_raw(), fr::PixelType::U8x4)
+    {
         Ok(v) => v,
         Err(_) => return img.resize_exact(nw, nh, imageops::FilterType::Lanczos3),
     };
@@ -379,7 +380,11 @@ fn encode_jpeg(img: &DynamicImage, cfg: &ExportConfig, source_path: Option<&Path
 }
 
 /// 构建含 DPI 和 EXIF/XMP 的完整 JPEG 字节流
-fn build_jpeg_with_metadata(base_jpeg: &[u8], app1_segments: Option<&[Vec<u8>]>, dpi: u32) -> Vec<u8> {
+fn build_jpeg_with_metadata(
+    base_jpeg: &[u8],
+    app1_segments: Option<&[Vec<u8>]>,
+    dpi: u32,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(base_jpeg.len() + 2048);
 
     // SOI (Start of Image)

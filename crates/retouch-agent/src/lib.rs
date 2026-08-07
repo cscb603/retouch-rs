@@ -192,7 +192,10 @@ fn detect_proxy() -> Option<String> {
             }
         }
     }
-    // best-effort：从登录 shell 取（GUI 从 Finder 启动、且未手动配置代理时尝试）
+    // best-effort：从登录 shell 取（GUI 从 Finder 启动、且未手动配置代理时尝试）。
+    // 仅 Unix：Windows 上没有 /bin/zsh，spawn 必然失败，白白起两个进程还可能
+    // 触发杀软的进程创建告警——直接跳过，Windows 走 env（系统代理已注入 env）。
+    #[cfg(unix)]
     for sh in ["/bin/zsh", "/bin/bash"] {
         if let Ok(out) = std::process::Command::new(sh)
             .args(["-lc", "echo -n \"$HTTPS_PROXY\""])
