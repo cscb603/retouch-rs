@@ -9,7 +9,11 @@
 # 用法: scripts/build_mac_app.sh [版本号]
 #   默认版本 0.1.0。产物在 target/release/Retouch-0.1.0-macOS.zip
 #
-set -euo pipefail
+# 注意：用 `set -eo pipefail` 而非 `set -euo pipefail`。
+# 在 WorkBuddy 的 safe-bin shim（export -f rm/unlink/rmdir + 注入 set -u）下，
+# `set -u`(nounset) 会与导出函数产生已知交互异常，导致脚本内「已赋值变量」被
+# 误判为 unbound 而崩溃。去掉 u 即规避，变量均已定义。
+set -eo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

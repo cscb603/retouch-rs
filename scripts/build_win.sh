@@ -7,7 +7,11 @@
 #        + OFL.txt + README.txt
 #
 # 用法：bash scripts/build_win.sh [版本号，默认 0.1.4]
-set -euo pipefail
+# 注意：用 `set -eo pipefail` 而非 `set -euo pipefail`。
+# 在 WorkBuddy 的 safe-bin shim（export -f rm/unlink/rmdir + 注入 set -u）下，
+# `set -u`(nounset) 会与导出函数产生已知交互异常，导致脚本内「已赋值变量」被
+# 误判为 unbound 而崩溃。去掉 u 即规避，变量均已定义。
+set -eo pipefail
 cd "$(dirname "$0")/.."
 
 VER="${1:-0.6.4}"
@@ -22,9 +26,9 @@ echo "==> 1/4 交叉编译 Windows release ($TARGET)"
 export RC="/opt/homebrew/opt/llvm/bin/llvm-rc"
 # RUSTC_WRAPPER= SDKROOT= ：避免全局 sccache 把 macOS SDKROOT 误传给 clang-cl，
 #                          导致含 C 代码的 crate(ring) 交叉编译失败（隐蔽坑，改 rustflags 触发全量重编才爆）
-# -p retouch-ui --no-default-features ：只编 GUI 包且排除 qwen(retouch-agent→ureq→ring)，
-#                          否则 workspace 会连带编译 retouch-agent，触发 ring 交叉编译失败
-RUSTC_WRAPPER= SDKROOT= cargo xwin build --release --target "$TARGET" -p retouch-ui --no-default-features
+# -p retouch-ui ：带 default features（含 qwen）。ureq 已换 native-tls，不再依赖 ring，
+#                故 Windows 交叉编译可正常编入 retouch-agent（AI 追色），与 Mac 功能一致。
+RUSTC_WRAPPER= SDKROOT= cargo xwin build --release --target "$TARGET" -p retouch-ui
 
 echo "==> 2/4 组装打包目录"
 rm -rf "$OUT_DIR"
