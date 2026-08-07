@@ -12,7 +12,7 @@ use inpaint::telea_inpaint;
 use ndarray::{Array2, Array3};
 
 /// 单笔污点笔画：归一化中心 + 归一化半径（占短边比例）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct SpotStroke {
     /// 水平中心，0..1（相对于正立基图宽度）。
     pub cx: f32,
@@ -20,14 +20,25 @@ pub struct SpotStroke {
     pub cy: f32,
     /// 半径，占目标图像短边比例（如 0.01 = 短边 1%）。
     pub r_norm: f32,
+    /// 是否由「自动检测污点」生成（便于覆盖重跑，不影响手动笔触）。
+    pub is_auto: bool,
 }
 
 impl SpotStroke {
     pub fn new(cx: f32, cy: f32, r_norm: f32) -> Self {
+        Self::with_auto(cx, cy, r_norm, false)
+    }
+
+    pub fn auto(cx: f32, cy: f32, r_norm: f32) -> Self {
+        Self::with_auto(cx, cy, r_norm, true)
+    }
+
+    fn with_auto(cx: f32, cy: f32, r_norm: f32, is_auto: bool) -> Self {
         Self {
             cx: cx.clamp(0.0, 1.0),
             cy: cy.clamp(0.0, 1.0),
             r_norm: r_norm.max(0.0),
+            is_auto,
         }
     }
 }
@@ -69,8 +80,17 @@ impl SpotFix {
         self.strokes.clear();
     }
 
+    /// 仅清除自动检测生成的笔触，保留用户手动标记的笔触。
+    pub fn clear_auto_strokes(&mut self) {
+        self.strokes.retain(|s| !s.is_auto);
+    }
+
     pub fn add_stroke(&mut self, cx: f32, cy: f32, r_norm: f32) {
         self.strokes.push(SpotStroke::new(cx, cy, r_norm));
+    }
+
+    pub fn add_auto_stroke(&mut self, cx: f32, cy: f32, r_norm: f32) {
+        self.strokes.push(SpotStroke::auto(cx, cy, r_norm));
     }
 
     /// 修复总入口：按 mode 分派到 Telea / 频率分离 / Poisson。空笔画 = 恒等。
@@ -269,6 +289,24 @@ pub fn render_with_spot(
 mod tests {
     use super::*;
     use image::Rgb;
+
+    #[test]
+    fn clear_auto_strokes_keeps_manual_ones() {
+        let mut spot = SpotFix::new();
+        spot.add_stroke(0.1, 0.1, 0.01);
+        spot.add_auto_stroke(0.2, 0.2, 0.02);
+        spot.add_auto_stroke(0.3, 0.3, 0.03);
+        spot.add_stroke(0.4, 0.4, 0.04);
+        assert_eq!(spot.strokes.len(), 4);
+        spot.clear_auto_strokes();
+        assert_eq!(spot.strokes.len(), 2);
+        assert!(!spot.strokes[0].is_auto);
+        assert!(!spot.strokes[1].is_auto);
+        assert!(
+            (spot.strokes[0].cx - 0.1).abs() < 1e-4
+                && (spot.strokes[1].cx - 0.4).abs() < 1e-4
+        );
+    }
 
     #[test]
     fn spot_empty_is_identity() {

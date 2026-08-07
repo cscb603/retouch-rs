@@ -2177,7 +2177,7 @@ impl RetouchApp {
                 ui.horizontal(|ui| {
                     if ui
                         .button("✨ 自动检测污点")
-                        .on_hover_text("自动检测传感器灰尘/亮斑/暗点并生成修复笔触（不做语义级检测，可手动微调）")
+                        .on_hover_text("自动检测传感器灰尘/亮斑/暗点并生成修复笔触；每次点击会覆盖上次自动结果，手动笔触保留；点「保存」或「导出」才实际应用修复。")
                         .clicked()
                     {
                         match (&self.base_rgba, self.base_size) {
@@ -2201,12 +2201,15 @@ impl RetouchApp {
                                         .spot
                                         .get_or_insert_with(retouch_core::spot::SpotFix::new);
                                     spot.mode = self.heal_mode;
+                                    // 每次自动检测都覆盖上一次的自动笔触，避免连点翻倍；
+                                    // 手动笔触保留不动。
+                                    spot.clear_auto_strokes();
                                     for s in strokes {
-                                        spot.add_stroke(s.cx, s.cy, s.r_norm);
+                                        spot.add_auto_stroke(s.cx, s.cy, s.r_norm);
                                     }
                                     self.dirty_geo = true;
                                     self.status = format!(
-                                        "自动检测到 {} 处污点并已加入修复（{}ms）——可继续手动增删",
+                                        "自动检测到 {} 处污点并已加入修复笔触（{}ms）；点「保存」或「导出」才实际修掉",
                                         n, ms
                                     );
                                 }
@@ -2214,8 +2217,13 @@ impl RetouchApp {
                             _ => self.status = "请先打开图片".into(),
                         }
                     }
-                    ui.label("（自动选区，可手动微调）");
+                    ui.label("（仅生成选区；保存/导出时真正修复）");
                 });
+                ui.label(
+                    egui::RichText::new("提示：先点「自动检测」生成选区，再点「保存」或「导出」完成修复")
+                        .weak()
+                        .size(11.0),
+                );
                 ui.horizontal(|ui| {
                     ui.label("笔刷");
                     ui.add(egui::Slider::new(&mut self.spot_brush, 2..=50).suffix(" px"))
