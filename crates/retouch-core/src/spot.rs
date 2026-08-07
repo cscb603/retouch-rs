@@ -42,6 +42,10 @@ pub enum HealMode {
     /// Poisson 梯度域无缝克隆（精修档，默认）：完全无痕。
     #[default]
     Poisson,
+    /// 内容感知移除（PatchMatch / Criminisi 式逐环边界填充）：
+    /// 细线 / 电线 / 杆 / 细缝去除专用——纹理连续区域比 Telea 更自然。
+    /// 注意：朴素实现下大块物体去除不稳健，此类场景仍推荐 Poisson。
+    PatchMatch,
 }
 
 /// 污点修复层：一组笔画 + 算法档位。空 = 无修复（恒等）。

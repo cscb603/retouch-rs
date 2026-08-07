@@ -7,10 +7,6 @@
 //!
 //! GUI-only binary (`retouch-rs-gui`); the engine is `retouch-core`.
 
-// 在 Windows 上以 GUI 子系统链接（双击不弹控制台黑窗口）；
-// 其它平台编译器自动忽略此属性。
-#![windows_subsystem = "windows"]
-
 use eframe::egui;
 use image::GenericImageView;
 use palette::{IntoColor, LinSrgb, Oklab};
@@ -432,9 +428,13 @@ impl RetouchApp {
             applied_title: None,
             api_qwen_key: {
                 #[cfg(feature = "qwen")]
-                { Self::load_qwen_key() }
+                {
+                    Self::load_qwen_key()
+                }
                 #[cfg(not(feature = "qwen"))]
-                { String::new() }
+                {
+                    String::new()
+                }
             },
             qwen_proxy: Self::load_qwen_proxy(),
             qwen_open: false,
@@ -1616,7 +1616,7 @@ impl RetouchApp {
             || self.auto_running
     }
 
-    /// 
+    ///
 
     /// 统一的图片加载入口：文件对话框与拖拽都走这里，避免重复逻辑。
     /// 加载成功后刷新指标、标记脏、清空后台智能修图状态。
@@ -2102,44 +2102,6 @@ impl RetouchApp {
         .clicked()
     }
 
-    /// 带细线框的工具栏分组：左侧弱化的分组名标签 + 按钮组，
-    /// 所有文字使用同一套中文字体、无 emoji/图标，避免 fallback 字体造成高低错落。
-    fn toolbar_group<F>(ui: &mut egui::Ui, label: &str, content: F)
-    where
-        F: FnOnce(&mut egui::Ui),
-    {
-        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
-        egui::Frame::group(ui.style())
-            .fill(ui.visuals().faint_bg_color)
-            .stroke(egui::Stroke::new(0.5, stroke.color))
-            .rounding(egui::Rounding::same(2.0))
-            .inner_margin(egui::Margin {
-                left: 8.0,
-                right: 8.0,
-                top: 4.0,
-                bottom: 4.0,
-            })
-            .outer_margin(egui::Margin::same(2.0))
-            .show(ui, |ui| {
-                // 整行交叉轴居中，保证标签和按钮垂直中线对齐。
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    // 分组名：纯文字标签，固定与按钮一致的高度，文字在分配空间里居中。
-                    ui.add_sized(
-                        egui::vec2(0.0, 28.0),
-                        egui::Label::new(
-                            egui::RichText::new(label)
-                                .size(12.0)
-                                .weak()
-                                .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
-                        )
-                        .selectable(false),
-                    );
-                    ui.add_space(6.0);
-                    content(ui);
-                });
-            });
-    }
-
     /// 按 ThemeMode 设置深色/浅色主题
     fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
         let is_dark = match mode {
@@ -2172,12 +2134,29 @@ impl RetouchApp {
         if self.tool_mode == ToolMode::Spot {
             ui.group(|ui| {
                 ui.label(egui::RichText::new("污点修复画笔").strong());
-                // 算法档位：传统(Telea) / 自然(频率分离) / 精修(Poisson) / 智能(AOT-GAN)。
-                ui.columns(3, |cols| {
+                // 算法档位：传统(Telea) / 自然(频率分离) / 精修(Poisson) / 内容感知(PatchMatch)。
+                ui.columns(4, |cols| {
                     let items = [
-                        (HealMode::Telea, "传统", "传统 Telea 扩散算法：适合极小污点，速度快"),
-                        (HealMode::FreqSep, "自然", "频率分离融合：保留源块纹理+目标光照，自然无痕"),
-                        (HealMode::Poisson, "精修", "Poisson 梯度域无缝克隆：完全无痕，适合精细修复"),
+                        (
+                            HealMode::Telea,
+                            "传统",
+                            "传统 Telea 扩散算法：适合极小污点，速度快",
+                        ),
+                        (
+                            HealMode::FreqSep,
+                            "自然",
+                            "频率分离融合：保留源块纹理+目标光照，自然无痕",
+                        ),
+                        (
+                            HealMode::Poisson,
+                            "精修",
+                            "Poisson 梯度域无缝克隆：完全无痕，适合精细修复",
+                        ),
+                        (
+                            HealMode::PatchMatch,
+                            "内容感知",
+                            "内容感知移除（PatchMatch）：细线/电线/杆/细缝去除更自然，纹理连续；大块物体仍建议精修",
+                        ),
                     ];
                     for (i, (mode, label, tip)) in items.iter().enumerate() {
                         let selected = self.heal_mode == *mode;
@@ -2197,13 +2176,14 @@ impl RetouchApp {
                 });
                 ui.horizontal(|ui| {
                     ui.label("笔刷");
-                    ui.add(
-                        egui::Slider::new(&mut self.spot_brush, 2..=50)
-                            .suffix(" px")
-                    ).on_hover_text("笔刷大小：鼠标滚轮 或 按 [ 减小 / ] 增大（快捷键 PS 同款）");
+                    ui.add(egui::Slider::new(&mut self.spot_brush, 2..=50).suffix(" px"))
+                        .on_hover_text(
+                            "笔刷大小：鼠标滚轮 或 按 [ 减小 / ] 增大（快捷键 PS 同款）",
+                        );
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("撤销一笔")
+                    if ui
+                        .button("撤销一笔")
                         .on_hover_text("撤销最后标记的一处污点（Cmd+Z）")
                         .clicked()
                     {
@@ -2215,7 +2195,8 @@ impl RetouchApp {
                         }
                         self.dirty_geo = true;
                     }
-                    if ui.button("清空")
+                    if ui
+                        .button("清空")
                         .on_hover_text("清除所有污点标记，重新开始")
                         .clicked()
                     {
@@ -2246,13 +2227,18 @@ impl RetouchApp {
                 if let Some(src) = &self.src {
                     let m = analyze(src);
                     let t = retouch_core::tonemap::classify_tonality(&m);
-                    let adj = tonal_adjustments(src, self.smart_compensation, self.neutral_strength);
+                    let adj =
+                        tonal_adjustments(src, self.smart_compensation, self.neutral_strength);
                     self.status = format!(
                         "自动中性化 · {}：色温 {:.2} / 色调 {:.2}，智能补偿{}",
                         t.label,
                         adj.white_balance.temp,
                         adj.white_balance.tint,
-                        if self.smart_compensation { "启用" } else { "关闭" }
+                        if self.smart_compensation {
+                            "启用"
+                        } else {
+                            "关闭"
+                        }
                     );
                     self.replace_adj_preserve_geo(adj);
                     // 存亮度基线供「还原亮度」滑块使用
@@ -2287,7 +2273,12 @@ impl RetouchApp {
 
         // ═══ 分类：基础校正 ═══
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("基础校正").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.label(
+            egui::RichText::new("基础校正")
+                .size(12.0)
+                .strong()
+                .color(egui::Color32::from_gray(140)),
+        );
         ui.separator();
 
         // 曝光 / 影调
@@ -2343,7 +2334,13 @@ impl RetouchApp {
 
         // 去假色
         Self::collapsing_section("去假色", force_open, ui, |ui| {
-            ui.label(egui::RichText::new("消除色度溢出产生的假色（紫边 / 荧光色块），尤其高反差边缘、天空、肤色。").size(11.0).weak());
+            ui.label(
+                egui::RichText::new(
+                    "消除色度溢出产生的假色（紫边 / 荧光色块），尤其高反差边缘、天空、肤色。",
+                )
+                .size(11.0)
+                .weak(),
+            );
             changed |= ui
                 .checkbox(&mut self.adj.defake.enabled, "启用")
                 .on_hover_text("开启假色抑制；默认轻微，不会洗掉正常饱和色")
@@ -2385,7 +2382,12 @@ impl RetouchApp {
 
         // ═══ 分类：色彩与风格 ═══
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("色彩与风格").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.label(
+            egui::RichText::new("色彩与风格")
+                .size(12.0)
+                .strong()
+                .color(egui::Color32::from_gray(140)),
+        );
         ui.separator();
 
         // 色彩风格
@@ -2433,32 +2435,57 @@ impl RetouchApp {
 
         // ═══ 分类：智能辅助 ═══
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("智能辅助").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.label(
+            egui::RichText::new("智能辅助")
+                .size(12.0)
+                .strong()
+                .color(egui::Color32::from_gray(140)),
+        );
         ui.separator();
 
         // 智能一键：比原软件更省心（单项自动）
         Self::collapsing_section("智能一键", force_open, ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("自动曝光").on_hover_text("按直方图把曝光拉到标准中点，确保不过曝不欠曝").clicked() {
+                if ui
+                    .button("自动曝光")
+                    .on_hover_text("按直方图把曝光拉到标准中点，确保不过曝不欠曝")
+                    .clicked()
+                {
                     self.auto_exposure();
                     changed = true;
                 }
-                if ui.button("自动白平衡").on_hover_text("消除色偏，把中性灰拉正，还原真实色彩").clicked() {
+                if ui
+                    .button("自动白平衡")
+                    .on_hover_text("消除色偏，把中性灰拉正，还原真实色彩")
+                    .clicked()
+                {
                     self.auto_wb();
                     changed = true;
                 }
             });
             ui.horizontal(|ui| {
-                if ui.button("一键粉嫩").on_hover_text("自动去黄+提亮+加粉，健康自然肤色").clicked() {
+                if ui
+                    .button("一键粉嫩")
+                    .on_hover_text("自动去黄+提亮+加粉，健康自然肤色")
+                    .clicked()
+                {
                     self.adj.skin = SkinTone::pink();
                     changed = true;
                 }
-                if ui.button("智能去雾").on_hover_text("压低灰蒙蒙的大气散射，恢复画面通透感").clicked() {
+                if ui
+                    .button("智能去雾")
+                    .on_hover_text("压低灰蒙蒙的大气散射，恢复画面通透感")
+                    .clicked()
+                {
                     self.auto_dehaze();
                     changed = true;
                 }
             });
-            if ui.button("全智能（曝光+白平衡+去雾）").on_hover_text("一次性跑完三项基础自动校正，省心起点").clicked() {
+            if ui
+                .button("全智能（曝光+白平衡+去雾）")
+                .on_hover_text("一次性跑完三项基础自动校正，省心起点")
+                .clicked()
+            {
                 self.auto_exposure();
                 self.auto_wb();
                 self.auto_dehaze();
@@ -2507,7 +2534,12 @@ impl RetouchApp {
 
         // ═══ 分类：参考 ═══
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("参考").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.label(
+            egui::RichText::new("参考")
+                .size(12.0)
+                .strong()
+                .color(egui::Color32::from_gray(140)),
+        );
         ui.separator();
 
         // 参考图匹配：导入喜欢的图，把当前图影调朝它靠拢（纯算法，零 AI）。
@@ -2563,7 +2595,12 @@ impl RetouchApp {
 
         // ═══ 分类：人像 ═══
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("人像").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.label(
+            egui::RichText::new("人像")
+                .size(12.0)
+                .strong()
+                .color(egui::Color32::from_gray(140)),
+        );
         ui.separator();
 
         // 智能美肤 A（v0.6，零模型）
@@ -2573,7 +2610,11 @@ impl RetouchApp {
                 ui.label("强度");
                 ui.add(egui::Slider::new(&mut self.beauty_strength, 0.0..=1.0).suffix("%"));
             });
-            if ui.button("一键美肤").on_hover_text("按当前强度一键粉嫩肤色 + 温和磨皮，人像更通透").clicked() {
+            if ui
+                .button("一键美肤")
+                .on_hover_text("按当前强度一键粉嫩肤色 + 温和磨皮，人像更通透")
+                .clicked()
+            {
                 self.apply_smart_beauty(self.beauty_strength);
             }
         });
@@ -2626,7 +2667,12 @@ impl RetouchApp {
 
         // ═══ 分类：细节与修复 ═══
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("细节与修复").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.label(
+            egui::RichText::new("细节与修复")
+                .size(12.0)
+                .strong()
+                .color(egui::Color32::from_gray(140)),
+        );
         ui.separator();
 
         // 细节后处理（M5）：降噪 / 锐化 / 柔光
@@ -2638,7 +2684,12 @@ impl RetouchApp {
 
         // ═══ 分类：结构与构图 ═══
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("结构与构图").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.label(
+            egui::RichText::new("结构与构图")
+                .size(12.0)
+                .strong()
+                .color(egui::Color32::from_gray(140)),
+        );
         ui.separator();
 
         // 旋转与裁剪（M4b）：裁剪 / 旋转 / 翻转 / 透视
@@ -2788,7 +2839,12 @@ impl RetouchApp {
 
         // ═══ 分类：高级 / 诊断 ═══
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("高级 / 诊断").size(12.0).strong().color(egui::Color32::from_gray(140)));
+        ui.label(
+            egui::RichText::new("高级 / 诊断")
+                .size(12.0)
+                .strong()
+                .color(egui::Color32::from_gray(140)),
+        );
         ui.separator();
 
         // HSL 分区
@@ -2843,114 +2899,114 @@ impl RetouchApp {
         // 作品名设置（可选联网）：仅「生成作品名」用 Qwen 视觉；不点则不联网、零 token。
         #[cfg(feature = "qwen")]
         {
-        let mut qopen = self.qwen_open;
-        Self::collapsing_section_state(
-            "作品名设置（可选 · 已记忆 Key）",
-            &mut qopen,
-            ui,
-            |ui| {
-                ui.label(
+            let mut qopen = self.qwen_open;
+            Self::collapsing_section_state(
+                "作品名设置（可选 · 已记忆 Key）",
+                &mut qopen,
+                ui,
+                |ui| {
+                    ui.label(
                     egui::RichText::new(
                         "仅「生成作品名」用 Qwen 视觉；不填则不联网、零 token。Key 已本地记住。",
                     )
                     .size(11.0)
                     .weak(),
                 );
-                let mut key = self.api_qwen_key.clone();
-                ui.horizontal(|ui| {
-                    ui.label("Qwen Key");
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut key)
-                            .password(true)
-                            .hint_text("粘贴 DashScope / Qwen Key"),
-                    );
-                    if r.changed() {
-                        self.api_qwen_key = key.trim().to_string();
-                        Self::save_qwen_key(&self.api_qwen_key);
-                        changed = true;
-                    }
-                });
-                let mut proxy = self.qwen_proxy.clone();
-                ui.horizontal(|ui| {
-                    ui.label("代理(可选)");
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut proxy)
-                            .hint_text("http://127.0.0.1:50434（VPN 代理）"),
-                    );
-                    if r.changed() {
-                        self.qwen_proxy = proxy.trim().to_string();
-                        Self::save_qwen_proxy(&self.qwen_proxy);
-                        changed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("生成作品名")
-                        .on_hover_text("用 Qwen 视觉为当前图起名 + 点评（需 Key）")
-                        .clicked()
-                    {
-                        self.generate_title();
-                    }
-                    if ui
-                        .button("清除 Key")
-                        .on_hover_text("删除本地记住的 Key（下次需重填）")
-                        .clicked()
-                    {
-                        self.api_qwen_key.clear();
-                        Self::forget_qwen_key();
-                        changed = true;
-                    }
-                });
-                if let Some(t) = &self.last_title {
-                    ui.separator();
-                    // 作品名（可点选复制）
-                    let title = if let Some(s) = t.find('》') {
-                        &t[..s + 3]
-                    } else {
-                        &t[..]
-                    };
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(title).size(15.0).strong())
-                            .selectable(true),
-                    );
+                    let mut key = self.api_qwen_key.clone();
                     ui.horizontal(|ui| {
-                        let name_only = title.replace('《', "").replace('》', "");
-                        if ui.button("复制作品名").clicked() {
-                            ui.ctx().copy_text(name_only);
-                        }
-                        if ui.button("复制全部").clicked() {
-                            ui.ctx().copy_text(t.clone());
+                        ui.label("Qwen Key");
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut key)
+                                .password(true)
+                                .hint_text("粘贴 DashScope / Qwen Key"),
+                        );
+                        if r.changed() {
+                            self.api_qwen_key = key.trim().to_string();
+                            Self::save_qwen_key(&self.api_qwen_key);
+                            changed = true;
                         }
                     });
-                    // 点评（安全切分：用 split_once 走字符边界，绝不 panic）
-                    let review = t
-                        .split_once('—')
-                        .map(|(_, c)| c.trim())
-                        .or_else(|| t.split_once('》').map(|(_, c)| c.trim()))
-                        .unwrap_or("");
-                    if !review.trim().is_empty() {
-                        ui.add_space(2.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt("review_scroll")
-                            .max_height(140.0)
-                            .show(ui, |ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(review.trim())
-                                            .size(13.0)
-                                            .color(egui::Color32::from_gray(180)),
-                                    )
-                                    .selectable(true),
-                                );
-                            });
-                        if ui.button("复制点评").clicked() {
-                            ui.ctx().copy_text(review.trim().to_string());
+                    let mut proxy = self.qwen_proxy.clone();
+                    ui.horizontal(|ui| {
+                        ui.label("代理(可选)");
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut proxy)
+                                .hint_text("http://127.0.0.1:50434（VPN 代理）"),
+                        );
+                        if r.changed() {
+                            self.qwen_proxy = proxy.trim().to_string();
+                            Self::save_qwen_proxy(&self.qwen_proxy);
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("生成作品名")
+                            .on_hover_text("用 Qwen 视觉为当前图起名 + 点评（需 Key）")
+                            .clicked()
+                        {
+                            self.generate_title();
+                        }
+                        if ui
+                            .button("清除 Key")
+                            .on_hover_text("删除本地记住的 Key（下次需重填）")
+                            .clicked()
+                        {
+                            self.api_qwen_key.clear();
+                            Self::forget_qwen_key();
+                            changed = true;
+                        }
+                    });
+                    if let Some(t) = &self.last_title {
+                        ui.separator();
+                        // 作品名（可点选复制）
+                        let title = if let Some(s) = t.find('》') {
+                            &t[..s + 3]
+                        } else {
+                            &t[..]
+                        };
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(title).size(15.0).strong())
+                                .selectable(true),
+                        );
+                        ui.horizontal(|ui| {
+                            let name_only = title.replace('《', "").replace('》', "");
+                            if ui.button("复制作品名").clicked() {
+                                ui.ctx().copy_text(name_only);
+                            }
+                            if ui.button("复制全部").clicked() {
+                                ui.ctx().copy_text(t.clone());
+                            }
+                        });
+                        // 点评（安全切分：用 split_once 走字符边界，绝不 panic）
+                        let review = t
+                            .split_once('—')
+                            .map(|(_, c)| c.trim())
+                            .or_else(|| t.split_once('》').map(|(_, c)| c.trim()))
+                            .unwrap_or("");
+                        if !review.trim().is_empty() {
+                            ui.add_space(2.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("review_scroll")
+                                .max_height(140.0)
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(review.trim())
+                                                .size(13.0)
+                                                .color(egui::Color32::from_gray(180)),
+                                        )
+                                        .selectable(true),
+                                    );
+                                });
+                            if ui.button("复制点评").clicked() {
+                                ui.ctx().copy_text(review.trim().to_string());
+                            }
                         }
                     }
-                }
-            },
-        );
-        self.qwen_open = qopen;
+                },
+            );
+            self.qwen_open = qopen;
         }
 
         ui.separator();
@@ -3278,13 +3334,11 @@ impl RetouchApp {
         let n = self.album.slots.len();
 
         // ═══ 顶部小工具条 ═══
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(4.0);
-            if Self::toolbar_btn(ui, "导入", "多选导入图片到相册（上限 50）") {
-                self.open();
-            }
-            if n > 0 {
-                ui.add_space(2.0);
+        // 空状态时不显示「导入」按钮——导入入口已统一放到顶部「文件」菜单，
+        // 避免右侧相册栏只为一个按钮占整栏宽度。
+        if n > 0 {
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(4.0);
                 if Self::toolbar_btn(ui, "←", "上一张") {
                     let prev = (self.album.active_idx + n - 1) % n;
                     self.switch_to(prev);
@@ -3299,13 +3353,21 @@ impl RetouchApp {
                         self.batch_export(dir);
                     }
                 }
-            }
-        });
-        ui.separator();
+            });
+            ui.separator();
+        }
 
         if n == 0 {
             ui.centered_and_justified(|ui| {
-                ui.label("相册为空。点「导入」多选图片，或拖拽到画布。");
+                ui.vertical_centered(|ui| {
+                    ui.label("相册为空");
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("拖入图片，或使用 文件 → 打开/批量导出")
+                            .size(12.0)
+                            .weak(),
+                    );
+                });
             });
             return;
         }
@@ -3625,74 +3687,97 @@ impl RetouchApp {
             ui.separator();
 
             // ═══════════════════════════════════════════
-            // Row 3: 工具栏按钮组（可换行：窄窗时分组自动折到下一行，绝不溢出屏外）
+            // Row 3: 响应式工具栏
+            // 标准商业软件模式：左侧下拉菜单归类，右侧核心按钮始终可见。
+            // 窄窗时优先保证「调色 / 污点」等高频工具不被截断。
             // ═══════════════════════════════════════════
             ui.horizontal_wrapped(|ui| {
                 ui.add_space(4.0);
 
-                Self::toolbar_group(ui, "文件", |ui| {
-                    if Self::toolbar_btn(ui, "打开", "从文件系统打开图片 (Cmd+O)") {
+                // ── 文件菜单 ──
+                ui.menu_button("文件 ▼", |ui| {
+                    ui.set_min_width(160.0);
+                    if ui.button("打开…").clicked() {
                         self.open();
+                        ui.close_menu();
                     }
-                    if Self::toolbar_btn(ui, "载入预设", "加载 TOML 预设参数 (Cmd+P)") {
-                        self.load_preset_file();
-                    }
-                    if Self::toolbar_btn(ui, "存预设", "把当前所有参数保存为 TOML 预设")
-                    {
-                        self.save_preset_file();
-                    }
-                    if Self::toolbar_btn(ui, "保存图", "导出/保存图片 (Cmd+S)") {
+                    if ui.button("保存图").clicked() {
                         self.save();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("载入预设").clicked() {
+                        self.load_preset_file();
+                        ui.close_menu();
+                    }
+                    if ui.button("存预设").clicked() {
+                        self.save_preset_file();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("批量导出").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.batch_export(dir);
+                        }
+                        ui.close_menu();
                     }
                     #[cfg(feature = "qwen")]
-                    if Self::toolbar_btn(ui, "作品名", "Qwen 视觉生成作品名（默认不联网）")
-                    {
+                    if ui.button("作品名").clicked() {
                         self.generate_title();
+                        ui.close_menu();
                     }
                 });
 
-                Self::toolbar_group(ui, "校正", |ui| {
-                    if Self::toolbar_btn(ui, "一键中性", "本地零 key 中性校正（闭环，不过曝）")
-                    {
+                // ── 校正菜单 ──
+                ui.menu_button("校正 ▼", |ui| {
+                    ui.set_min_width(140.0);
+                    if ui.button("一键中性").clicked() {
                         self.start_local_auto();
+                        ui.close_menu();
                     }
-                    if Self::toolbar_btn(ui, "参考匹配", "导入喜欢的图，一键克隆它的影调")
-                    {
+                    if ui.button("参考匹配").clicked() {
                         if self.ref_metrics.is_none() {
                             self.import_reference(ctx);
                         } else {
                             self.start_reference_match();
                         }
+                        ui.close_menu();
                     }
                 });
 
-                Self::toolbar_group(ui, "视图", |ui| {
-                    if Self::toolbar_btn(ui, "命令", "打开命令盘 (Cmd+K)") {
+                // ── 视图菜单 ──
+                ui.menu_button("视图 ▼", |ui| {
+                    ui.set_min_width(140.0);
+                    if ui.button("命令").clicked() {
                         self.show_cmd = !self.show_cmd;
+                        ui.close_menu();
                     }
-                    if Self::toolbar_btn(ui, "全展开", "展开所有参数分组") {
+                    ui.separator();
+                    if ui.button("全展开").clicked() {
                         self.force_open = Some(true);
+                        ui.close_menu();
                     }
-                    if Self::toolbar_btn(ui, "全收起", "收起所有参数分组") {
+                    if ui.button("全收起").clicked() {
                         self.force_open = Some(false);
+                        ui.close_menu();
                     }
+                    ui.separator();
                     let album_label = if self.show_album {
-                        "●相册"
+                        "● 隐藏相册"
                     } else {
-                        "相册"
+                        "显示相册"
                     };
-                    if Self::toolbar_btn(ui, album_label, "显示/隐藏右侧相册栏（窄窗自动折叠）")
-                    {
+                    if ui.button(album_label).clicked() {
                         self.show_album = !self.show_album;
+                        ui.close_menu();
                     }
-                });
-
-                Self::toolbar_group(ui, "画布", |ui| {
-                    if Self::toolbar_btn(ui, "适应", "缩放图片到刚好填满画布") {
+                    ui.separator();
+                    if ui.button("适应").clicked() {
                         self.zoom = 1.0;
                         self.pan = egui::Vec2::ZERO;
+                        ui.close_menu();
                     }
-                    if Self::toolbar_btn(ui, "1:1", "按实际像素显示") {
+                    if ui.button("1:1").clicked() {
                         if let Some(tex) = &self.texture {
                             let avail = ui.available_size();
                             let size = tex.size_vec2();
@@ -3700,45 +3785,77 @@ impl RetouchApp {
                             self.zoom = 1.0 / fit.max(1e-3);
                             self.pan = egui::Vec2::ZERO;
                         }
+                        ui.close_menu();
                     }
-                    let cmp_label = match self.compare_mode {
-                        CompareMode::Off => "对比原图",
-                        CompareMode::Toggle => "对比：原图",
-                        CompareMode::Split => "对比：分屏",
-                    };
-                    if Self::toolbar_btn(
-                        ui,
-                        cmp_label,
-                        "点击循环：关 → 整图显示原图 → 左右分屏对比（也可按住 \\ 键临时看原图）",
-                    ) {
+                    if ui.button("对比原图").clicked() {
                         self.compare_mode = match self.compare_mode {
                             CompareMode::Off => CompareMode::Toggle,
                             CompareMode::Toggle => CompareMode::Split,
                             CompareMode::Split => CompareMode::Off,
                         };
+                        ui.close_menu();
                     }
                 });
 
-                Self::toolbar_group(ui, "工具", |ui| {
-                    let adj_on = self.tool_mode == ToolMode::Adjust;
-                    if Self::toolbar_btn(
-                        ui,
-                        if adj_on { "●调色" } else { "调色" },
-                        "普通调色模式（画笔/缩放/对比）",
-                    ) {
-                        self.tool_mode = ToolMode::Adjust;
-                    }
-                    let spot_on = self.tool_mode == ToolMode::Spot;
-                    if Self::toolbar_btn(
-                        ui,
-                        if spot_on { "●污点" } else { "污点" },
-                        "污点修复画笔模式：在画布上点/拖修复瑕疵",
-                    ) {
-                        self.tool_mode = ToolMode::Spot;
-                    }
-                });
+                ui.separator();
 
-                // 行尾右间距：Mac 顶部面板右内边距偏小，最右「污点」按钮会贴边框；
+                // ── 核心快速按钮（始终显示，避免「污点」等高频工具被折叠） ──
+                if Self::toolbar_btn(ui, "打开", "从文件系统打开图片 (Cmd+O)") {
+                    self.open();
+                }
+                if Self::toolbar_btn(ui, "保存", "导出/保存图片 (Cmd+S)") {
+                    self.save();
+                }
+                if Self::toolbar_btn(ui, "一键中性", "本地零 key 中性校正（闭环，不过曝）")
+                {
+                    self.start_local_auto();
+                }
+
+                let adj_on = self.tool_mode == ToolMode::Adjust;
+                if Self::toolbar_btn(
+                    ui,
+                    if adj_on { "●调色" } else { "调色" },
+                    "普通调色模式（画笔/缩放/对比）",
+                ) {
+                    self.tool_mode = ToolMode::Adjust;
+                }
+                let spot_on = self.tool_mode == ToolMode::Spot;
+                if Self::toolbar_btn(
+                    ui,
+                    if spot_on { "●污点" } else { "污点" },
+                    "污点修复画笔模式：在画布上点/拖修复瑕疵",
+                ) {
+                    self.tool_mode = ToolMode::Spot;
+                }
+
+                let cmp_label = match self.compare_mode {
+                    CompareMode::Off => "对比原图",
+                    CompareMode::Toggle => "对比：原图",
+                    CompareMode::Split => "对比：分屏",
+                };
+                if Self::toolbar_btn(
+                    ui,
+                    cmp_label,
+                    "点击循环：关 → 整图显示原图 → 左右分屏对比（也可按住 \\ 键临时看原图）",
+                ) {
+                    self.compare_mode = match self.compare_mode {
+                        CompareMode::Off => CompareMode::Toggle,
+                        CompareMode::Toggle => CompareMode::Split,
+                        CompareMode::Split => CompareMode::Off,
+                    };
+                }
+
+                let album_label = if self.show_album {
+                    "●相册"
+                } else {
+                    "相册"
+                };
+                if Self::toolbar_btn(ui, album_label, "显示/隐藏右侧相册栏（窄窗自动折叠）")
+                {
+                    self.show_album = !self.show_album;
+                }
+
+                // 行尾右间距：Mac 顶部面板右内边距偏小，最右按钮会贴边框；
                 // Windows 默认边距够，保持 4px 不动。这里仅 Mac 加宽到 14px。
                 #[cfg(target_os = "macos")]
                 ui.add_space(14.0);

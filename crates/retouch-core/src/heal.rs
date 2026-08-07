@@ -10,7 +10,7 @@
 //! - 所有运算仅在污点局部 bounding box 上进行，分辨率无关、体量极小、预览实时。
 //! - 任何异常都回退原图（或 Telea），绝不崩。
 
-use crate::spot::{HealMode, SpotFix};
+use crate::spot::{inpaint_rgb, HealMode, SpotFix};
 use image::{GenericImageView, GrayImage, Rgb, RgbImage};
 
 /// 对整张 RGB 图施加一组污点笔画的修复（按 mode 分派）。空笔画 = 恒等。
@@ -26,6 +26,7 @@ pub fn heal_image(img: &RgbImage, spot: &SpotFix, preview: bool) -> RgbImage {
         HealMode::Telea => crate::spot::inpaint_rgb_feathered(img, spot),
         HealMode::FreqSep => heal_strokes(img, spot, false, preview),
         HealMode::Poisson => heal_strokes(img, spot, true, preview),
+        HealMode::PatchMatch => heal_patchmatch(img, spot, preview),
     }
 }
 
@@ -488,6 +489,340 @@ fn telea_single(img: &mut RgbImage, cx: i32, cy: i32, r: i32) {
     }
 }
 
+/// 内容感知移除（PatchMatch / Criminisi 式逐环边界填充）。
+/// 把 spot 内所有笔画的圆形洞**合并成一张并集 mask**，在并集 bbox（含上下文 padding）上
+/// 一次性做 PatchMatch 填充——与验证台（整张线一次填充）一致的写法，避免「逐笔独立圆盘」
+/// 把连续线条当成结构续接回洞里的坑。
+/// 细线/电线/杆/细缝场景比 Telea 更自然（纹理连续）；残留洞回退 Telea，绝不崩。
+/// `preview`：true = 减少迭代，拖动流畅；false = 导出满迭代。
+pub fn heal_patchmatch(img: &RgbImage, spot: &SpotFix, preview: bool) -> RgbImage {
+    if spot.is_empty() {
+        return img.clone();
+    }
+    let (w, h) = img.dimensions();
+    let (w, h) = (w as i32, h as i32);
+    // 解析所有笔画为图像坐标 (cx, cy, r)；r<1 跳过。
+    let mut strokes: Vec<(i32, i32, i32)> = Vec::with_capacity(spot.strokes.len());
+    let mut max_r = 1i32;
+    for s in &spot.strokes {
+        let cx = (s.cx * w as f32).round().clamp(0.0, (w - 1) as f32) as i32;
+        let cy = (s.cy * h as f32).round().clamp(0.0, (h - 1) as f32) as i32;
+        let r = (s.r_norm * (w.min(h)) as f32).clamp(1.0, 60.0).round() as i32;
+        if r < 1 {
+            continue;
+        }
+        max_r = max_r.max(r);
+        strokes.push((cx, cy, r));
+    }
+    if strokes.is_empty() {
+        return img.clone();
+    }
+    // 并集 bbox（含上下文 padding，给 PatchMatch 足够可抄纹理）。
+    let pad = (max_r * 3).clamp(24, 96);
+    let mut minx = w;
+    let mut miny = h;
+    let mut maxx = 0;
+    let mut maxy = 0;
+    for (cx, cy, r) in &strokes {
+        minx = minx.min(cx - r);
+        miny = miny.min(cy - r);
+        maxx = maxx.max(cx + r);
+        maxy = maxy.max(cy + r);
+    }
+    let bx = (minx - pad).clamp(0, w - 1);
+    let by = (miny - pad).clamp(0, h - 1);
+    let bw = ((maxx + pad).clamp(0, w - 1) - bx + 1).max(1) as u32;
+    let bh = ((maxy + pad).clamp(0, h - 1) - by + 1).max(1) as u32;
+    if bx + bw as i32 > w || by + bh as i32 > h || bw < 1 || bh < 1 {
+        return img.clone();
+    }
+    let mut out = img.clone();
+    let mut sub = out.view(bx as u32, by as u32, bw, bh).to_image();
+    // 并集圆形洞 mask（255 = 需填充）。
+    let mut submask = GrayImage::new(bw, bh);
+    for (cx, cy, r) in &strokes {
+        let scx = cx - bx;
+        let scy = cy - by;
+        let r2 = r * r;
+        let y0 = (scy - r).clamp(0, bh as i32 - 1);
+        let y1 = (scy + r).clamp(0, bh as i32 - 1);
+        let x0 = (scx - r).clamp(0, bw as i32 - 1);
+        let x1 = (scx + r).clamp(0, bw as i32 - 1);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let dx = x - scx;
+                let dy = y - scy;
+                if dx * dx + dy * dy <= r2 {
+                    submask.put_pixel(x as u32, y as u32, image::Luma([255u8]));
+                }
+            }
+        }
+    }
+    // 全图无任何洞（极端情况）→ 直接返回。
+    if !submask.pixels().any(|p| p[0] > 0) {
+        return out;
+    }
+    // 补丁半径：随并集尺寸缩放但封顶（验证台 patch_r=4 在 256² 上已足够）。
+    let patch_r = ((bw.max(bh) as f32 / 32.0).round() as i32).clamp(3, 8);
+    let inner_iters: u32 = if preview { 2 } else { 3 };
+    let all_filled = patchmatch_fill(&mut sub, &submask, patch_r, inner_iters);
+    // 残留洞 → Telea 兜底（绝不留黑洞）。
+    if !all_filled {
+        let telea_r = (patch_r + 1).clamp(1, 30);
+        sub = inpaint_rgb(&sub, &submask, telea_r);
+    }
+    // 写回仅洞像素（已知像素保持原图，不影响已愈合区）。
+    for y in 0..bh as i32 {
+        for x in 0..bw as i32 {
+            if submask.get_pixel(x as u32, y as u32)[0] > 0 {
+                let p = sub.get_pixel(x as u32, y as u32);
+                out.put_pixel((bx + x) as u32, (by + y) as u32, *p);
+            }
+        }
+    }
+    out
+}
+
+/// 在 `img` 上原地填充 mask(255 = 洞) 像素，采用 Criminisi 式「按边界置信度逐环填充」的
+/// PatchMatch：随机初始化 + 传播 + 随机搜索；匹配只用原始已知像素；每轮只提交「补丁内含有
+/// 已知像素」的边界环，从边界向内逐环填充，大空洞不退化。
+/// 返回是否所有洞像素都被成功填充（false = rounds 用尽仍有残留，调用方应 Telea 兜底）。
+fn patchmatch_fill(img: &mut RgbImage, mask: &GrayImage, patch_r: i32, inner_iters: u32) -> bool {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return true;
+    }
+    let (w, h) = (w as i32, h as i32);
+    let n = (w * h) as usize;
+    // 工作缓冲：f32 RGB + 已知标志。
+    let mut cur = vec![[0.0f32; 3]; n];
+    let mut known = vec![true; n];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let p = img.get_pixel(x as u32, y as u32);
+            cur[i] = [p[0] as f32, p[1] as f32, p[2] as f32];
+            if mask.get_pixel(x as u32, y as u32)[0] > 0 {
+                known[i] = false;
+            }
+        }
+    }
+    if known.iter().all(|&k| k) {
+        return true; // 无洞
+    }
+
+    let idx = |x: i32, y: i32| (y as usize) * w as usize + x as usize;
+    let inb = |x: i32, y: i32| x >= 0 && y >= 0 && x < w && y < h;
+    let patch_known = |known: &[bool], sx: i32, sy: i32| -> bool {
+        for dy in -patch_r..=patch_r {
+            for dx in -patch_r..=patch_r {
+                let x = sx + dx;
+                let y = sy + dy;
+                if !inb(x, y) || !known[idx(x, y)] {
+                    return false;
+                }
+            }
+        }
+        true
+    };
+    // 只统计目标补丁中的原始已知像素做 SSD，空洞不参与（避免垃圾值污染）。
+    let ssd = |cur: &[[f32; 3]], known: &[bool], px: i32, py: i32, sx: i32, sy: i32| -> f32 {
+        if !patch_known(known, sx, sy) {
+            return f32::INFINITY;
+        }
+        let mut s = 0.0f32;
+        for dy in -patch_r..=patch_r {
+            for dx in -patch_r..=patch_r {
+                let tx = px + dx;
+                let ty = py + dy;
+                if !inb(tx, ty) || !known[idx(tx, ty)] {
+                    continue;
+                }
+                let si = idx(sx + dx, sy + dy);
+                let ti = idx(tx, ty);
+                for (&a, &b) in cur[ti].iter().zip(cur[si].iter()) {
+                    let d = a - b;
+                    s += d * d;
+                }
+            }
+        }
+        s
+    };
+
+    // 随机初始化偏移（xorshift64，确定性可复现）。
+    let mut off: Vec<(i32, i32)> = vec![(0, 0); n];
+    let mut rng: u64 = 0x9E3779B97F4A7C15;
+    let mut rnd = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng as f64) / (u64::MAX as f64)
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let i = idx(x, y);
+            if !known[i] {
+                for _ in 0..64 {
+                    let sx = (rnd() * w as f64) as i32;
+                    let sy = (rnd() * h as f64) as i32;
+                    if patch_known(&known, sx, sy) {
+                        off[i] = (sx - x, sy - y);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut rounds = 0;
+    loop {
+        rounds += 1;
+        // 内圈 PatchMatch 匹配（覆盖当前所有洞）。
+        for it in 0..inner_iters {
+            let forward = it % 2 == 0;
+            let ys: Vec<i32> = if forward {
+                (0..h).collect()
+            } else {
+                (0..h).rev().collect()
+            };
+            for y in ys {
+                let xs: Vec<i32> = if forward {
+                    (0..w).collect()
+                } else {
+                    (0..w).rev().collect()
+                };
+                for x in xs {
+                    let i = idx(x, y);
+                    if known[i] {
+                        continue;
+                    }
+                    let mut best = off[i];
+                    let mut best_err = ssd(&cur, &known, x, y, x + best.0, y + best.1);
+                    let neigh = if forward {
+                        [(x - 1, y), (x, y - 1)]
+                    } else {
+                        [(x + 1, y), (x, y + 1)]
+                    };
+                    for (nx, ny) in neigh {
+                        if !inb(nx, ny) {
+                            continue;
+                        }
+                        let ni = idx(nx, ny);
+                        if !known[ni] {
+                            let no = off[ni];
+                            let e = ssd(&cur, &known, x, y, x + no.0, y + no.1);
+                            if e < best_err {
+                                best = no;
+                                best_err = e;
+                            }
+                        }
+                    }
+                    let mut ww = (w.max(h) as f64).max(8.0);
+                    while ww > 1.0 {
+                        let dx = ((rnd() * 2.0 - 1.0) * ww).round() as i32;
+                        let dy = ((rnd() * 2.0 - 1.0) * ww).round() as i32;
+                        let sx = x + dx;
+                        let sy = y + dy;
+                        if inb(sx, sy) {
+                            let e = ssd(&cur, &known, x, y, sx, sy);
+                            if e < best_err {
+                                best = (dx, dy);
+                                best_err = e;
+                            }
+                        }
+                        ww *= 0.5;
+                    }
+                    off[i] = best;
+                }
+            }
+        }
+        // 提交边界环：仅填充「补丁内有已知像素」的洞，重叠源补丁平均。
+        let mut acc = vec![[0.0f32; 3]; n];
+        let mut cnt = vec![0u32; n];
+        for y in 0..h {
+            for x in 0..w {
+                let i = idx(x, y);
+                if known[i] {
+                    continue;
+                }
+                let mut boundary = false;
+                for dy in -patch_r..=patch_r {
+                    for dx in -patch_r..=patch_r {
+                        if inb(x + dx, y + dy) && known[idx(x + dx, y + dy)] {
+                            boundary = true;
+                            break;
+                        }
+                    }
+                    if boundary {
+                        break;
+                    }
+                }
+                if !boundary {
+                    continue;
+                }
+                let (ox, oy) = off[i];
+                for dy in -patch_r..=patch_r {
+                    for dx in -patch_r..=patch_r {
+                        let tx = x + dx;
+                        let ty = y + dy;
+                        if !inb(tx, ty) || known[idx(tx, ty)] {
+                            continue;
+                        }
+                        let vx = x + ox + dx;
+                        let vy = y + oy + dy;
+                        if !inb(vx, vy) || !known[idx(vx, vy)] {
+                            continue;
+                        }
+                        let ti = idx(tx, ty);
+                        let vi = idx(vx, vy);
+                        for c in 0..3 {
+                            acc[ti][c] += cur[vi][c];
+                        }
+                        cnt[ti] += 1;
+                    }
+                }
+            }
+        }
+        let mut filled = 0usize;
+        for i in 0..n {
+            if !known[i] && cnt[i] > 0 {
+                for c in 0..3 {
+                    cur[i][c] = acc[i][c] / cnt[i] as f32;
+                }
+                known[i] = true;
+                filled += 1;
+            }
+        }
+        if filled == 0 || rounds > 80 {
+            break;
+        }
+        if known.iter().all(|&k| k) {
+            break;
+        }
+    }
+
+    // 写回洞像素（原图其余像素不动）。
+    let mut all = true;
+    for i in 0..n {
+        if !known[i] {
+            all = false; // 残留未填，调用方 Telea 兜底
+        } else if mask.get_pixel((i as i32 % w) as u32, (i as i32 / w) as u32)[0] > 0 {
+            let x = (i as i32 % w) as u32;
+            let y = (i as i32 / w) as u32;
+            img.put_pixel(
+                x,
+                y,
+                Rgb([
+                    cur[i][0].clamp(0.0, 255.0) as u8,
+                    cur[i][1].clamp(0.0, 255.0) as u8,
+                    cur[i][2].clamp(0.0, 255.0) as u8,
+                ]),
+            );
+        }
+    }
+    all
+}
+
 /// 可分离高斯模糊（f32 单通道）。半径 = ceil(3*sigma)，边界 clamp。
 fn gaussian_blur(buf: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
     if sigma <= 0.0 {
@@ -689,5 +1024,52 @@ mod tests {
             "选中源纹理能量应与洞周接近（ratio={}）",
             ratio
         );
+    }
+
+    #[test]
+    fn patchmatch_heals_defect_seamless() {
+        let dist = heal_center_distance(HealMode::PatchMatch);
+        assert!(
+            dist < 60.0,
+            "PatchMatch 档未修复到背景附近（dist={}）",
+            dist
+        );
+    }
+
+    #[test]
+    fn patchmatch_no_panic_on_small_image() {
+        // 极小图也应安全返回（bbox 可能越界 → 直接跳过该笔，不崩）。
+        let img = RgbImage::from_pixel(16, 16, Rgb([120u8, 90, 200]));
+        let mut spot = SpotFix::new();
+        spot.mode = HealMode::PatchMatch;
+        spot.add_stroke(0.5, 0.5, 0.2);
+        let out = heal_image(&img, &spot, false);
+        assert_eq!(out.dimensions(), (16, 16));
+    }
+
+    #[test]
+    fn patchmatch_fills_a_thin_line() {
+        // 细线场景：背景 + 一条 2px 竖线；沿竖线画一串小笔刷（模拟拖出细线）。
+        // PatchMatch 应把线填回背景，且角落不被误改。
+        let mut img = RgbImage::from_pixel(64, 64, Rgb([200u8, 180, 160]));
+        for y in 0..64u32 {
+            for x in 30..32u32 {
+                img.put_pixel(x, y, Rgb([20u8, 20, 20]));
+            }
+        }
+        // 走真实并集填充路径：所有笔画合并成一张 mask 一次填充（模拟沿细线拖出一整条）。
+        let mut spot = SpotFix::new();
+        spot.mode = HealMode::PatchMatch;
+        // r_norm=0.04 → 64 图上半径≈2.6px，覆盖 2px 宽竖线；沿 y 排布成连续带。
+        for y in 0..64 {
+            spot.add_stroke(0.5, y as f32 / 64.0, 0.04);
+        }
+        let out = heal_image(&img, &spot, false);
+        let fixed = out.get_pixel(31, 32).0;
+        let dist = ((fixed[0] as i32 - 200).abs()
+            + (fixed[1] as i32 - 180).abs()
+            + (fixed[2] as i32 - 160).abs()) as f32;
+        assert!(dist < 45.0, "细线未被 PatchMatch 修复（dist={}）", dist);
+        assert_eq!(out.get_pixel(2, 2).0, [200u8, 180, 160], "角落被误改");
     }
 }
