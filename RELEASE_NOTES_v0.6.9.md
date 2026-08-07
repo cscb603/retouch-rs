@@ -32,9 +32,11 @@
 - 每笔可各自选档位（传统 / 自然 / 精修 / 内容感知）；灵敏度滑块抑制天空等平滑背景的误检。
 - 标注可隐藏、检测圈收紧；撤销一笔 / 清空 / 笔刷大小 / 前后对比 / 相册多图 / 全分辨率导出（MozJPEG 4:4:4）全部保留。
 
-### 下载
-- **macOS（分享版，Retouch）**：`Retouch-0.6.9-macOS.zip`
-- **Windows 10 / 11（64 位）**：`初色-0.6.9-windows-x64.zip`
+### 下载（仅分享版：两个平台）
+- **macOS（分享版，Retouch）**：`Retouch-0.6.9-macOS.zip` — 发给朋友，右键打开即可
+- **Windows 10 / 11（64 位，分享版）**：`Retouch-0.6.9-windows-x64.zip` — 免 VC++ 运行库，双击即用
+
+> 自用版（初色，含个人 Qwen Key）仅供本地自用，不在本仓库分发。源码完全开源、不含任何 Key。
 
 ---
 
@@ -51,9 +53,11 @@
 
 **Spot-heal UX (since v0.6.7)**: no auto-detect doubling (`is_auto` marker), PS-style "select then apply" (red selection → green healed), per-stroke heal mode, sensitivity slider, hideable markers, full-resolution MozJPEG 4:4:4 export.
 
-**Download**
+**Download (share builds only: 2 platforms)**
 - macOS (share, Retouch): `Retouch-0.6.9-macOS.zip`
-- Windows 10/11 (64-bit): `初色-0.6.9-windows-x64.zip`
+- Windows 10/11 (64-bit, share): `Retouch-0.6.9-windows-x64.zip`
+
+> Self-use builds (初色, with personal Qwen Key) are for local use only and not distributed here. Source is fully open and contains no Key.
 
 ---
 

@@ -37,3 +37,9 @@ fast-video-compress/
 
 # 打包产物（大体积二进制/zip，仅本地分发用，不进仓库）
 dist/
+
+# Secrets — 绝不提交 Key / Token（qwen_key 在 ~/.retouch，不应进仓库）
+qwen_key
+.env
+.env.*
+*.pem
