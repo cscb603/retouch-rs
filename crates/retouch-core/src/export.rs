@@ -13,10 +13,9 @@ use crate::geometry::{apply_geometry, Geometry};
 use crate::pipeline::{render, Adjustments};
 use crate::sharpen;
 use crate::spot::SpotFix;
-use image::{
-    codecs::jpeg::JpegEncoder, imageops, DynamicImage, GenericImageView, ImageBuffer, ImageFormat,
-    Rgba,
-};
+use image::{imageops, DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgba};
+use mozjpeg_rs::{Encoder as MozEncoder, QuantTableIdx, Subsampling};
+use fast_image_resize as fr;
 use std::io::Cursor;
 use std::path::Path;
 
@@ -220,7 +219,8 @@ pub fn export_image(
 // 智能缩放
 // ──────────────────────────────────────────────
 
-/// 高保真缩图：Lanczos3 抗锯齿，保护重要颜色和信息
+/// 高保真缩图：fast_image_resize（SIMD）抗锯齿，保护颜色/细节
+/// 与高速缩图一致：U8x4(RGBA) + 默认 resize 算法；失败回退 image::resize_exact。
 fn smart_downscale(img: &DynamicImage, max_long_edge: u32) -> DynamicImage {
     let (w, h) = img.dimensions();
     if w.max(h) <= max_long_edge {
@@ -229,8 +229,22 @@ fn smart_downscale(img: &DynamicImage, max_long_edge: u32) -> DynamicImage {
     let scale = max_long_edge as f32 / w.max(h) as f32;
     let nw = (w as f32 * scale).round().max(1.0) as u32;
     let nh = (h as f32 * scale).round().max(1.0) as u32;
-    // Lanczos3 是最佳缩图算法，抗锯齿性强，保留细节好
-    img.resize_exact(nw, nh, imageops::FilterType::Lanczos3)
+
+    let rgba = img.to_rgba8();
+    let src_image = match fr::images::Image::from_vec_u8(w, h, rgba.into_raw(), fr::PixelType::U8x4) {
+        Ok(v) => v,
+        Err(_) => return img.resize_exact(nw, nh, imageops::FilterType::Lanczos3),
+    };
+    let mut dst_image = fr::images::Image::new(nw, nh, fr::PixelType::U8x4);
+    let mut resizer = fr::Resizer::new();
+    if resizer.resize(&src_image, &mut dst_image, None).is_err() {
+        return img.resize_exact(nw, nh, imageops::FilterType::Lanczos3);
+    }
+    let rgba_buf = dst_image.buffer().to_vec();
+    match ImageBuffer::from_raw(nw, nh, rgba_buf) {
+        Some(buf) => DynamicImage::ImageRgba8(buf),
+        None => img.resize_exact(nw, nh, imageops::FilterType::Lanczos3),
+    }
 }
 
 // ──────────────────────────────────────────────
@@ -310,7 +324,7 @@ fn add_border(img: &DynamicImage, style: &BorderStyle, corner_radius: Option<f32
                                 if let Some(p) =
                                     canvas.get_pixel_mut_checked(paste_x + x, paste_y + y)
                                 {
-                                    let t = 1.0; // 完全替换为白
+                                    let _t = 1.0; // 完全替换为白
                                     p.0[0] = 255;
                                     p.0[1] = 255;
                                     p.0[2] = 255;
@@ -338,31 +352,34 @@ fn encode_output(img: &DynamicImage, cfg: &ExportConfig, source_path: Option<&Pa
     }
 }
 
-/// JPEG 编码 + DPI + EXIF 保留
+/// JPEG 编码 + DPI + EXIF/XMP 保留（v0.6.6：mozjpeg-rs，默认 S444 无 chroma 下采样）
 fn encode_jpeg(img: &DynamicImage, cfg: &ExportConfig, source_path: Option<&Path>) -> Vec<u8> {
-    // 转 RGB8
+    // 转 RGB8（sRGB 像素）
     let rgb = img.to_rgb8();
-    let raw = rgb.as_raw();
     let (w, h) = rgb.dimensions();
+    let raw = rgb.into_raw();
 
-    // 1. 先用标准编码器获取 JPEG 数据（不含 DPI/EXIF）
-    let mut base_jpeg = Vec::new();
-    {
-        let mut encoder = JpegEncoder::new_with_quality(&mut base_jpeg, cfg.quality);
-        encoder
-            .encode(raw, w, h, image::ExtendedColorType::Rgb8)
-            .ok();
-    }
+    // 1. mozjpeg-rs 编码（S444 无 chroma 下采样 + progressive + Huffman 优化 + MssimTuned 量化表）
+    let encoder = MozEncoder::default()
+        .quality(cfg.quality)
+        .progressive(true)
+        .optimize_huffman(true)
+        .subsampling(Subsampling::S444)
+        .quant_tables(QuantTableIdx::MssimTuned);
+    let base_jpeg = match encoder.encode_rgb(&raw, w, h) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
 
-    // 2. 从源文件提取 EXIF（APP1 段）
-    let source_exif = source_path.and_then(|p| extract_exif_app1(p));
+    // 2. 从源文件提取 EXIF + XMP（APP1 段，不复制宽色域 ICC）
+    let source_app1 = source_path.and_then(|p| extract_app1_segments(p));
 
-    // 3. 构建完整的 JPEG 字节（注入 JFIF APP0 DPI + EXIF APP1）
-    build_jpeg_with_metadata(&base_jpeg, source_exif.as_deref(), cfg.dpi)
+    // 3. 构建完整 JPEG 字节（注入 JFIF APP0 DPI + APP1 段）
+    build_jpeg_with_metadata(&base_jpeg, source_app1.as_deref(), cfg.dpi)
 }
 
-/// 构建含 DPI 和 EXIF 的完整 JPEG 字节流
-fn build_jpeg_with_metadata(base_jpeg: &[u8], exif_data: Option<&[u8]>, dpi: u32) -> Vec<u8> {
+/// 构建含 DPI 和 EXIF/XMP 的完整 JPEG 字节流
+fn build_jpeg_with_metadata(base_jpeg: &[u8], app1_segments: Option<&[Vec<u8>]>, dpi: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(base_jpeg.len() + 2048);
 
     // SOI (Start of Image)
@@ -396,19 +413,15 @@ fn build_jpeg_with_metadata(base_jpeg: &[u8], exif_data: Option<&[u8]>, dpi: u32
     out.extend_from_slice(&app0_len.to_be_bytes());
     out.extend_from_slice(&jfif_data);
 
-    // EXIF APP1（如果源文件有）
-    if let Some(exif) = exif_data {
-        // exif_data 已经包含完整的 APP1 marker + length 吗？
-        // 通常 extract_exif_app1 只返回 payload，不含 marker/length
-        // APP1 marker
-        out.push(0xFF);
-        out.push(0xE1);
-        let exif_len = (exif.len() + 2) as u16;
-        out.extend_from_slice(&exif_len.to_be_bytes());
-        out.extend_from_slice(exif);
-
-        // 可选：在 EXIF 中嵌入 DPI 标签
-        // 但通常嵌入 DPI 到 EXIF 比较复杂，JFIF APP0 已足够
+    // EXIF / XMP APP1（若源文件有，逐个注入；不复制宽色域 ICC）
+    if let Some(segments) = app1_segments {
+        for exif in segments {
+            out.push(0xFF);
+            out.push(0xE1);
+            let exif_len = (exif.len() + 2) as u16;
+            out.extend_from_slice(&exif_len.to_be_bytes());
+            out.extend_from_slice(exif);
+        }
     }
 
     // 复制原始 JPEG 的扫描数据（跳过 SOI 标记，因为我们已经写了）
@@ -423,8 +436,8 @@ fn build_jpeg_with_metadata(base_jpeg: &[u8], exif_data: Option<&[u8]>, dpi: u32
     out
 }
 
-/// 从 JPEG 文件提取 EXIF APP1 段（不含 marker 和 length）
-fn extract_exif_app1(path: &Path) -> Option<Vec<u8>> {
+/// 从 JPEG 文件提取所有 APP1 段（EXIF + XMP，不含 marker 和 length）
+fn extract_app1_segments(path: &Path) -> Option<Vec<Vec<u8>>> {
     // 只处理 JPEG
     let ext = path.extension()?.to_str()?.to_lowercase();
     if !matches!(ext.as_str(), "jpg" | "jpeg") {
@@ -441,6 +454,7 @@ fn extract_exif_app1(path: &Path) -> Option<Vec<u8>> {
     }
 
     let mut offset = 2;
+    let mut segments: Vec<Vec<u8>> = Vec::new();
     // 遍历所有 marker 段
     while offset + 4 <= data.len() {
         if data[offset] != 0xFF {
@@ -458,10 +472,9 @@ fn extract_exif_app1(path: &Path) -> Option<Vec<u8>> {
                 let payload_start = offset + 4;
                 let payload_end = payload_start + seg_len - 2; // seg_len不包括自身
                 if payload_end <= data.len() {
-                    return Some(data[payload_start..payload_end].to_vec());
+                    segments.push(data[payload_start..payload_end].to_vec());
                 }
             }
-            // 即使没找到 EXIF 也要继续跳到下一段
             offset += 2 + seg_len;
         } else {
             let seg_len = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
@@ -469,7 +482,11 @@ fn extract_exif_app1(path: &Path) -> Option<Vec<u8>> {
         }
     }
 
-    None
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments)
+    }
 }
 
 /// PNG 编码（无需元数据操作）

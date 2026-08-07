@@ -1,7 +1,6 @@
 //! 端到端验证：对真实照片跑一键中性（run_auto），比对前后指标，确认「绝不毁图」。
 //! 用法：cargo run -p retouch-core --example verify_safe_real -- <图1> [图2] ...
 
-use image::DynamicImage;
 use retouch_core::analyze::analyze;
 use retouch_core::auto::run_auto;
 

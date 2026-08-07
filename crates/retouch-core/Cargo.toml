@@ -22,5 +22,9 @@ inpaint = "0.1.7"
 ndarray = "0.16.1"
 log = "0.4"
 
+# v0.6.6 导出画质升级（纯 Rust，零 C 依赖；Win 交叉编译无影响）
+mozjpeg-rs = "0.9.2"        # MozJPEG 编码：S444 无 chroma 下采样 + progressive + Huffman 优化
+fast_image_resize = "6.0"   # SIMD 重采样，替 image::resize_exact（Lanczos3）
+
 [features]
 default = []

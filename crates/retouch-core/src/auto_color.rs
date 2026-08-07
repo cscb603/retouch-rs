@@ -9,7 +9,6 @@ use crate::color_engine::{analyze_color, color_plan, scene_rules, ColorPlan};
 use crate::pipeline::{
     Adjustments, ColorGrade, DefakeColor, Grade, HslRegions, SkinTone, ToneMapMode, WhiteBalance,
 };
-use crate::tonemap::classify_tonality;
 use image::DynamicImage;
 use palette::{IntoColor, LinSrgb, Oklab, Srgb};
 

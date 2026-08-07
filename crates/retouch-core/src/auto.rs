@@ -21,7 +21,7 @@
 
 use crate::advanced::Advanced;
 use crate::analyze::{analyze, ImageMetrics};
-use crate::color_engine::{analyze_color, color_plan, scene_rules, ColorMetrics};
+use crate::color_engine::{analyze_color, color_plan, scene_rules};
 use crate::guardrail;
 use crate::guardrail::{goodness, is_artifact, target_for, ToneTarget};
 use crate::params::{registry, Field};

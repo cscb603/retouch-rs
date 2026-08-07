@@ -1,23 +1,23 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use image::{DynamicImage, GenericImageView, Rgb, RgbImage};
-use retouch_agent::{thumb_b64, QwenClient};
 use palette::{IntoColor, LinSrgb, Oklch};
+use retouch_agent::{thumb_b64, QwenClient};
+use retouch_core::advanced::{Advanced, FreqSepSkin, PyramidFusion};
+use retouch_core::analyze::{analyze, ImageMetrics};
+use retouch_core::auto::run_auto;
+use retouch_core::detail::Detail;
+use retouch_core::geometry::Geometry;
+use retouch_core::guardrail;
+use retouch_core::params::Field;
 use retouch_core::pipeline::{
     render, Adjustments, ColorGrade, DefakeColor, Grade, HslRegions, SkinTone, ToneMapMode,
     WhiteBalance, ZoneGrade,
 };
-use retouch_core::geometry::Geometry;
-use retouch_core::detail::Detail;
-use retouch_core::advanced::{Advanced, FreqSepSkin, PyramidFusion};
 use retouch_core::preset::{dump_preset, load_preset, Preset};
-use retouch_core::analyze::{analyze, ImageMetrics};
 use retouch_core::schema::param_schema;
-use retouch_core::auto::run_auto;
-use retouch_core::params::Field;
-use retouch_core::guardrail;
+use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Instant;
-use serde_json::Value;
 
 #[derive(Parser)]
 #[command(
@@ -334,7 +334,10 @@ fn build_hsl_regions(specs: &[String]) -> HslRegions {
         let (name, rest) = match spec.split_once(':') {
             Some(v) => v,
             None => {
-                eprintln!("warning: --hsl '{}' missing ':' (expected BAND:H,S,L), ignored", spec);
+                eprintln!(
+                    "warning: --hsl '{}' missing ':' (expected BAND:H,S,L), ignored",
+                    spec
+                );
                 continue;
             }
         };
@@ -540,10 +543,18 @@ fn resolve(opts: &CommonOpts) -> Adjustments {
     };
 
     // 几何预处理 (M4b)
-    let crop = opts.crop.as_deref().and_then(parse_crop).or(base.geometry.crop);
+    let crop = opts
+        .crop
+        .as_deref()
+        .and_then(parse_crop)
+        .or(base.geometry.crop);
     let perspective = {
-        let pv = opts.persp_v.unwrap_or(base.geometry.perspective.map_or(0.0, |p| p.0));
-        let ph = opts.persp_h.unwrap_or(base.geometry.perspective.map_or(0.0, |p| p.1));
+        let pv = opts
+            .persp_v
+            .unwrap_or(base.geometry.perspective.map_or(0.0, |p| p.0));
+        let ph = opts
+            .persp_h
+            .unwrap_or(base.geometry.perspective.map_or(0.0, |p| p.1));
         if pv == 0.0 && ph == 0.0 {
             None
         } else {
@@ -635,7 +646,11 @@ fn resolve(opts: &CommonOpts) -> Adjustments {
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
-        Command::Render { opts, input, output } => {
+        Command::Render {
+            opts,
+            input,
+            output,
+        } => {
             let mut adj = resolve(&opts);
             if let Some(p) = &opts.params {
                 apply_params_patch(&mut adj, p);
@@ -713,9 +728,7 @@ fn main() {
                 }
                 let img = image::open(&input).expect("failed to open input");
                 let (final_img, result) = run_auto(&img, 1024, rounds.max(1), 1.0);
-                final_img
-                    .save(&output)
-                    .expect("failed to save output");
+                final_img.save(&output).expect("failed to save output");
                 if json {
                     let report = format!("{}.json", output.display());
                     if let Ok(s) = serde_json::to_string_pretty(&result) {
@@ -788,10 +801,26 @@ fn main() {
             eprintln!("[name] calling QwenClient::review ...");
             match QwenClient::new(key).review(&b64, "{}", "中性校正 + 影调优化") {
                 Ok(v) => {
-                    let title = v.get("title").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                    let title_en = v.get("title_en").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                    let comment = v.get("comment").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                    let comment_en = v.get("comment_en").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let title = v
+                        .get("title")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let title_en = v
+                        .get("title_en")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let comment = v
+                        .get("comment")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let comment_en = v
+                        .get("comment_en")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if json {
                         let env = serde_json::json!({
                             "ok": true,
@@ -814,13 +843,14 @@ fn main() {
                     if json {
                         println!(
                             "{}",
-                            serde_json::to_string(&serde_json::json!({"ok": false, "error": e})).unwrap()
+                            serde_json::to_string(&serde_json::json!({"ok": false, "error": e}))
+                                .unwrap()
                         );
                     }
                     std::process::exit(1);
                 }
             }
-        },
+        }
     }
 }
 
@@ -864,7 +894,13 @@ fn run_verify(input: &PathBuf) {
     // [func] exposure brightens.
     {
         let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, Rgb([100u8, 100, 100])));
-        let lit = render(&img, &Adjustments { exposure_ev: 2.0, ..Default::default() });
+        let lit = render(
+            &img,
+            &Adjustments {
+                exposure_ev: 2.0,
+                ..Default::default()
+            },
+        );
         let v = lit.get_pixel(0, 0).0[0];
         let pass = v > 150;
         all_pass &= pass;
@@ -881,7 +917,11 @@ fn run_verify(input: &PathBuf) {
         let no_tm = render(&red, &Adjustments::identity());
         let agx = render(
             &red,
-            &Adjustments { exposure_ev: 2.0, tone_map: ToneMapMode::Agx, ..Default::default() },
+            &Adjustments {
+                exposure_ev: 2.0,
+                tone_map: ToneMapMode::Agx,
+                ..Default::default()
+            },
         );
         let nt = no_tm.get_pixel(0, 0).0;
         let ax = agx.get_pixel(0, 0).0;

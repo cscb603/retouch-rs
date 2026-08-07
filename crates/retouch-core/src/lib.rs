@@ -17,4 +17,5 @@ pub mod schema;
 pub mod sharpen;
 pub mod spatial;
 pub mod spot;
+pub mod detect_spots;
 pub mod tonemap;

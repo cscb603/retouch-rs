@@ -122,7 +122,9 @@ impl QwenClient {
             }
         }
         let v = v.ok_or_else(|| format!("Qwen 请求失败（已尝试全部线路）: {}", last_err))?;
-        let text = v["choices"][0]["message"]["content"].as_str().unwrap_or("{}");
+        let text = v["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("{}");
         let obj: Value = serde_json::from_str(text).unwrap_or(Value::Null);
         Ok(obj)
     }
@@ -182,12 +184,7 @@ fn probe_proxy_alive(proxy_url: &str) -> bool {
 /// Finder 双击启动的 GUI 不继承终端 env，但用户在「作品名设置」手动填的代理会被
 /// 写进进程 env，这里就能读到；若都没有则直连。
 fn detect_proxy() -> Option<String> {
-    for var in [
-        "HTTPS_PROXY",
-        "https_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-    ] {
+    for var in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
         if let Ok(v) = std::env::var(var) {
             let v = v.trim().to_string();
             if !v.is_empty() {

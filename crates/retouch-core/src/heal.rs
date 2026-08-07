@@ -130,7 +130,7 @@ fn patchmatch_source_center(
     cx: i32,
     cy: i32,
     r: i32,
-    iters: u32,
+    _iters: u32,
     step: i32,
 ) -> Option<(i32, i32)> {
     let (w, h) = img.dimensions();
@@ -403,7 +403,7 @@ fn poisson_heal(img: &mut RgbImage, cx: i32, cy: i32, r: i32, sx: i32, sy: i32, 
                     for (ddx, ddy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
                         let nx = x as i32 + ddx;
                         let ny = y as i32 + ddy;
-                        let (nb_val, gs, gt) =
+                        let (nb_val, gs, _gt) =
                             if nx >= 0 && ny >= 0 && (nx as usize) < d && (ny as usize) < d {
                                 let nidx = (ny as usize * d + nx as usize) * 3;
                                 let nb = if in_mask[ny as usize * d + nx as usize] {
@@ -613,6 +613,26 @@ fn patchmatch_fill(img: &mut RgbImage, mask: &GrayImage, patch_r: i32, inner_ite
 
     let idx = |x: i32, y: i32| (y as usize) * w as usize + x as usize;
     let inb = |x: i32, y: i32| x >= 0 && y >= 0 && x < w && y < h;
+
+    // 洞包围盒（含 patch_r 边距），inner 循环只扫此范围，加速大图小污点。
+    let mut min_x = w as i32;
+    let mut min_y = h as i32;
+    let mut max_x = 0i32;
+    let mut max_y = 0i32;
+    for y in 0..h {
+        for x in 0..w {
+            if !known[idx(x, y)] {
+                if x < min_x { min_x = x; }
+                if y < min_y { min_y = y; }
+                if x > max_x { max_x = x; }
+                if y > max_y { max_y = y; }
+            }
+        }
+    }
+    let bx0 = (min_x - patch_r).max(0);
+    let by0 = (min_y - patch_r).max(0);
+    let bx1 = (max_x + patch_r + 1).min(w);
+    let by1 = (max_y + patch_r + 1).min(h);
     let patch_known = |known: &[bool], sx: i32, sy: i32| -> bool {
         for dy in -patch_r..=patch_r {
             for dx in -patch_r..=patch_r {
@@ -680,16 +700,16 @@ fn patchmatch_fill(img: &mut RgbImage, mask: &GrayImage, patch_r: i32, inner_ite
         // 内圈 PatchMatch 匹配（覆盖当前所有洞）。
         for it in 0..inner_iters {
             let forward = it % 2 == 0;
-            let ys: Vec<i32> = if forward {
-                (0..h).collect()
+            let ys: Box<dyn Iterator<Item = i32>> = if forward {
+                Box::new(by0..by1)
             } else {
-                (0..h).rev().collect()
+                Box::new((by0..by1).rev())
             };
             for y in ys {
-                let xs: Vec<i32> = if forward {
-                    (0..w).collect()
+                let xs: Box<dyn Iterator<Item = i32>> = if forward {
+                    Box::new(bx0..bx1)
                 } else {
-                    (0..w).rev().collect()
+                    Box::new((bx0..bx1).rev())
                 };
                 for x in xs {
                     let i = idx(x, y);
@@ -1005,7 +1025,7 @@ mod tests {
                     let d = ((dx * dx + dy * dy) as f32).sqrt();
                     if d >= r as f32 && d <= (r + c) as f32 {
                         let f = edge_feat(&img, xx, yy);
-                        s += (f[1].abs() + f[2].abs());
+                        s += f[1].abs() + f[2].abs();
                         n += 1;
                     }
                 }

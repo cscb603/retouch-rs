@@ -10,10 +10,10 @@
 //! 全部**不新增 UI 按钮**，只提升一键中性 / 参考匹配的颜色质量。
 
 use crate::analyze::ImageMetrics;
-use crate::pipeline::{Adjustments, ColorGrade, WhiteBalance};
-use crate::tonemap::{Key, Tonality};
+use crate::pipeline::WhiteBalance;
+use crate::tonemap::Key;
 use image::DynamicImage;
-use palette::{IntoColor, LinSrgb, OklabHue, Oklch};
+use palette::{IntoColor, LinSrgb, Oklch};
 
 // ── 7 种场景类型 ──────────────────────────────────────────
 
@@ -164,7 +164,7 @@ impl Default for ColorPlan {
 /// 对一张图做色彩分析，输出 ColorMetrics（一次预计算，~0.1ms @ 1280px）
 pub fn analyze_color(img: &DynamicImage, m: &ImageMetrics) -> ColorMetrics {
     let rgb = img.to_rgb8();
-    let (w, h) = rgb.dimensions();
+    let (_w, _h) = rgb.dimensions();
     let raw = rgb.into_raw();
     let n = (raw.len() / 3) as usize;
     let low_c_thr: f32 = 0.02;
@@ -268,7 +268,7 @@ pub fn analyze_color(img: &DynamicImage, m: &ImageMetrics) -> ColorMetrics {
     } else {
         0.0
     };
-    let mean_green_h = if green_pixels > 0 {
+    let _mean_green_h = if green_pixels > 0 {
         (green_h_sum / green_pixels as f64) as f32
     } else {
         0.0
@@ -326,7 +326,7 @@ fn classify_scene(
     cast_hue: f32,
     cast_chroma: f32,
     sky_ratio: f32,
-    green_ratio: f32,
+    _green_ratio: f32,
 ) -> SceneType {
     let key = if m.tone.median_l < 0.38 {
         Key::Low
@@ -384,8 +384,8 @@ pub fn color_plan(cm: &ColorMetrics, rules: &SceneRules, strength: f32) -> Color
     };
 
     let saturation_target = match cm.scene {
-        SceneType::Vivid => (1.0 - (0.08 * cf).min(0.20)), // 浓色降饱和
-        SceneType::FlatLowContrast => (1.0 + (0.06 * cf).min(0.15)),
+        SceneType::Vivid => 1.0 - (0.08 * cf).min(0.20), // 浓色降饱和
+        SceneType::FlatLowContrast => 1.0 + (0.06 * cf).min(0.15),
         _ => 1.0,
     };
 
@@ -518,7 +518,7 @@ pub fn apply_color_correction(oklch: &mut Oklch<f32>, plan: &ColorPlan, _orig_c:
     // 日落/暖阳场景中传感器记录的黄(hue 48-72°)拉向眼见的橙(hue 35-45°)
     if plan.warm_boost > 0.0 && h >= 45.0 && h <= 78.0 && c > 0.03 {
         let target_warm_h = 38.0;
-        let mut dh = target_warm_h - h;
+        let dh = target_warm_h - h;
         if dh.abs() > 1.5 {
             oklch.hue = palette::OklabHue::from_degrees(
                 (h + dh * plan.warm_boost * 0.60).rem_euclid(360.0), // ↑0.3→0.6

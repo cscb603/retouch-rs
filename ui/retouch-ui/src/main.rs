@@ -2175,6 +2175,48 @@ impl RetouchApp {
                     }
                 });
                 ui.horizontal(|ui| {
+                    if ui
+                        .button("✨ 自动检测污点")
+                        .on_hover_text("自动检测传感器灰尘/亮斑/暗点并生成修复笔触（不做语义级检测，可手动微调）")
+                        .clicked()
+                    {
+                        match (&self.base_rgba, self.base_size) {
+                            (Some(rgba), [bw, bh]) if bw > 0 && bh > 0 => {
+                                let t0 = std::time::Instant::now();
+                                let strokes = retouch_core::detect_spots::detect_spots_from_rgb(
+                                    rgba,
+                                    bw as u32,
+                                    bh as u32,
+                                    &retouch_core::detect_spots::DetectParams::default(),
+                                );
+                                let ms = t0.elapsed().as_millis();
+                                if strokes.is_empty() {
+                                    self.status = format!(
+                                        "未检测到明显污点（{}ms）——画面较干净，或瑕疵偏大/贴近纹理，请手动圈选",
+                                        ms
+                                    );
+                                } else {
+                                    let n = strokes.len();
+                                    let spot = self
+                                        .spot
+                                        .get_or_insert_with(retouch_core::spot::SpotFix::new);
+                                    spot.mode = self.heal_mode;
+                                    for s in strokes {
+                                        spot.add_stroke(s.cx, s.cy, s.r_norm);
+                                    }
+                                    self.dirty_geo = true;
+                                    self.status = format!(
+                                        "自动检测到 {} 处污点并已加入修复（{}ms）——可继续手动增删",
+                                        n, ms
+                                    );
+                                }
+                            }
+                            _ => self.status = "请先打开图片".into(),
+                        }
+                    }
+                    ui.label("（自动选区，可手动微调）");
+                });
+                ui.horizontal(|ui| {
                     ui.label("笔刷");
                     ui.add(egui::Slider::new(&mut self.spot_brush, 2..=50).suffix(" px"))
                         .on_hover_text(

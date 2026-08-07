@@ -160,7 +160,7 @@ fn glow(img: &RgbImage, amount: f32) -> RgbImage {
 mod tests {
     use super::*;
     use image::{DynamicImage, Rgb, RgbImage};
-    use std::cmp::max;
+    
 
     fn noise_img(w: u32, h: u32, seed: u32) -> RgbImage {
         let mut img = RgbImage::new(w, h);
