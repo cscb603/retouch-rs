@@ -12,12 +12,13 @@
 # 误判为 unbound 而崩溃。去掉 u 即规避，变量均已定义。
 set -eo pipefail
 cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 
 VER="${1:-0.6.9}"
 BIN="retouch-rs-gui"
 TARGET="x86_64-pc-windows-msvc"
 SRC="target/$TARGET/release/$BIN.exe"
-OUT_DIR="target/$TARGET/release/pack"
+OUT_DIR="$(pwd)/target/$TARGET/release/pack"
 SHARE_DIR="$OUT_DIR/初色"
 SELF_DIR="$OUT_DIR/初色-自用版"
 
@@ -178,12 +179,11 @@ print("  ✅", out)
 PY
 
 echo "==> 5/6 复制到 dist/（软件仓库目录）"
-mkdir -p dist
-cp "../初色-$VER-windows-分享版.zip" "dist/初色-$VER-windows-分享版.zip"
-cp "../初色-$VER-windows-自用版.zip" "dist/初色-$VER-windows-自用版.zip"
+mkdir -p "$ROOT/dist"
+cp "../初色-$VER-windows-分享版.zip" "$ROOT/dist/初色-$VER-windows-分享版.zip"
+cp "../初色-$VER-windows-自用版.zip" "$ROOT/dist/初色-$VER-windows-自用版.zip"
 
 echo "==> 6/6 完成"
 echo "分享版：dist/初色-$VER-windows-分享版.zip"
 echo "自用版：dist/初色-$VER-windows-自用版.zip"
 ls -lh "dist/初色-$VER-windows-分享版.zip" "dist/初色-$VER-windows-自用版.zip"
-EOF
