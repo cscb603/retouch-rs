@@ -255,88 +255,15 @@ where
 /// `out = mix·proc + (1-mix)·orig`（见 pipeline.rs:1144）。故只需渲一次 full-effect
 /// 代理图 + 一次原图，按比例混合后量度，无需每档重渲整条管线。量度在缩略图上做，
 /// 与分辨率无关（mean_l / std_l / clip% 均为比例量）。
-pub fn safe_neutral(img: &DynamicImage, base: &ImageMetrics, mut adj: Adjustments) -> Adjustments {
-    let start_mix = adj.mix.clamp(0.0, 1.0);
-
-    // **全分辨率量度**（关键修复）：护栏指标（尤其 highlight_clip_pct）在缩略图代理上
-    // 会被邻域平均掉——细小高光点（车灯/反光）在 1024px 代理里被抹平，导致代理图算出来
-    // 「没过曝、安全」而放行，但全分辨率真出图时这些点全爆（成都街头 hi 0.02→1.81、
-    // 老报馆 hi 0.70→3.37 即此坑）。故直接在原始分辨率渲一次 full-effect 图，按 mix 逐像素
-    // 混合原图后量度，保证护栏判定指标 ≡ 最终出图指标。
-    // 成本：unsafe 图多渲一次全图 + 16 次混合量度；普通图在 start_mix 即安全、仅 1 次量度即返回。
-    // 安全底：mix=0 精确等于原图（blend(proc,orig,0)=orig），故扫描最差退回原图，绝不可能比原图更糟。
-    let orig_full = img.to_rgb8();
-    // full-effect 处理图（mix=1.0）——所有候选 mix 都由它与原图按比例混合得到
-    let proc_adj = Adjustments {
-        mix: 1.0,
-        ..adj.clone()
-    };
-    let proc_full = render(img, &proc_adj);
-
-    let cap = if base.tone.mean_l > 0.55 {
-        base.tone.mean_l + 0.02
-    } else {
-        0.58
-    };
-
-    // 在 mix=m 处的量度（全分辨率）：混合 proc/orig 后分析
-    let metrics_at = |m: f32| -> ImageMetrics {
-        let blended = blend_rgb(&proc_full, &orig_full, m);
-        analyze(&DynamicImage::ImageRgb8(blended))
-    };
-
-    // 真·毁图判定（单侧：只拦变糟，不拦「变淡」）
-    let is_safe = |mt: &ImageMetrics| -> bool {
-        if mt.tone.mean_l > cap {
-            return false;
-        }
-        if mt.exposure.highlight_clip_pct > base.exposure.highlight_clip_pct + 0.08 {
-            return false;
-        }
-        if base.skin.ratio > 0.03 && mt.skin.mean_l > 0.82 {
-            return false;
-        }
-        if mt.tone.std_l < base.tone.std_l * 0.60 {
-            return false;
-        }
-        true
-    };
-
-    // 普通图：起始 mix 已安全 → 无操作（保留自动中性化观感）
-    let start_metrics = metrics_at(start_mix);
-    if is_safe(&start_metrics) {
-        return adj;
-    }
-
-    // 从 start_mix 向下扫描，取「最高（最接近满校正）且安全」的 mix；
-    // 找不到则退回原图（mix=0）。单调可逆：mix 越小越靠近原图。
-    for i in 1..=16 {
-        let m = start_mix * (1.0 - i as f32 / 16.0);
-        if is_safe(&metrics_at(m)) {
-            adj.mix = m;
-            return adj;
-        }
-    }
-    adj.mix = 0.0;
+pub fn safe_neutral(_img: &DynamicImage, _base: &ImageMetrics, mut adj: Adjustments) -> Adjustments {
+    // 护栏策略（v0.6.9 修正）：**绝不使用全局 mix 折扣**。
+    // 历史实现把风险图的整体结果按 mix<1 与原图混合以「防过曝」，
+    // 但这会让用户在自动中性化之后拖动的曝光/对比/亮度等手动调整被 (1-mix) 整体打折，
+    // 造成「调了没反应」的误判（商业审查项 3）。
+    // 现改为：风险图的安全由 run_auto 闭环 + 伪影检测保证（见 run_auto）；
+    // 本护栏只确保输出 mix 恒为 1.0，使后续所有手动调整都能完整生效。
+    adj.mix = 1.0;
     adj
-}
-
-/// sRGB 逐像素线性混合：`out = m·proc + (1-m)·orig`，与 pipeline 的 `mix` 语义一致。
-#[inline]
-fn blend_rgb(proc: &RgbImage, orig: &RgbImage, m: f32) -> RgbImage {
-    let (w, h) = proc.dimensions();
-    let mut out = RgbImage::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let p = proc.get_pixel(x, y).0;
-            let o = orig.get_pixel(x, y).0;
-            let r = (m * p[0] as f32 + (1.0 - m) * o[0] as f32).round() as u8;
-            let g = (m * p[1] as f32 + (1.0 - m) * o[1] as f32).round() as u8;
-            let b = (m * p[2] as f32 + (1.0 - m) * o[2] as f32).round() as u8;
-            out.put_pixel(x, y, Rgb([r, g, b]));
-        }
-    }
-    out
 }
 
 /// Local, zero-network autonomous correction (v0.3.2+).
@@ -517,4 +444,33 @@ fn zone_blend(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    /// 商业审查项 3：一键中性化（run_auto）返回的 adjustments 必须 mix==1.0，
+    /// 否则用户之后拖动的曝光/对比等手动调整会被 (1-mix) 整体打折（「调了没反应」）。
+    #[test]
+    fn run_auto_keeps_mix_one() {
+        for variant in 0..3u8 {
+            let mut img = RgbImage::new(96, 96);
+            for (x, y, px) in img.enumerate_pixels_mut() {
+                let base = match variant {
+                    0 => ((x * 7 + y * 13) % 256) as u8, // 普通
+                    1 => (190u32 + ((x + y) % 50) as u32) as u8, // 高调（亮）
+                    _ => (25u32 + ((x * y) % 50) as u32) as u8,  // 低调（暗）
+                };
+                *px = Rgb([base, base.wrapping_div(2), 255u8.wrapping_sub(base)]);
+            }
+            let (_out, result) = run_auto(&DynamicImage::ImageRgb8(img), 256, 2, 1.0);
+            assert_eq!(
+                result.adjustments.mix, 1.0,
+                "variant {} 一键中性后 mix != 1.0，会削弱后续手动调整",
+                variant
+            );
+        }
+    }
 }

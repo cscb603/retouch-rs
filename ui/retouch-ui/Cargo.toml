@@ -10,10 +10,16 @@ path = "src/main.rs"
 [features]
 default = ["qwen"]
 qwen = ["retouch-agent"]
+# 皮肤精修模式（TrueSkin 引擎）：接入 trueskin-core 的 ONNX 模型 + BiSeNet 语义门控。
+# Mac 走默认 CPU EP；Windows 部署时加 `skin,cuda`（GTX1660 CUDA EP）。
+skin = ["trueskin-core", "trueskin-core/onnx"]
 
 [dependencies]
 retouch-core = { path = "../../crates/retouch-core" }
 retouch-agent = { path = "../../crates/retouch-agent", optional = true }
+# TrueSkin 皮肤精修引擎（路径依赖 trueskin-rs/crates/trueskin-core；不复制代码）。
+# 仅 `skin` feature 启用。ort/dylib 机制由 trueskin-core 内部声明，本 crate 不重复。
+trueskin-core = { path = "../../../trueskin-rs/crates/trueskin-core", optional = true, default-features = false }
 egui = "0.29"
 eframe = { version = "0.29", features = ["glow"] }
 rfd = "0.15"

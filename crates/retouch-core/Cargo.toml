@@ -8,7 +8,7 @@ name = "retouch_core"
 path = "src/lib.rs"
 
 [dependencies]
-image = "0.25"
+image = { version = "0.25", features = ["webp"] }
 palette = "0.7"
 zentone = "0.1.0"
 rayon = "1"

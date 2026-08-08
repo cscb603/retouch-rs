@@ -69,21 +69,30 @@ impl Tonality {
 
 /// 十大影调分类（全由 `analyze()` 量化指标得出，无 AI、无阈值拍脑袋）。
 ///
-/// - 基调：`mean_l < 0.38 → 低`；`0.38–0.62 → 中`；`> 0.62 → 高`。
+/// - 基调（面积比例，摄影定义）：亮部面积 ≥55% 且死黑 <4% → 高调；暗部面积 ≥25% 且死白 <4% → 低调；其余中调。median_l 作兜底。
 /// - 调性：`dynamic_range < 0.33 → 短`；`0.33–0.66 → 中`；`> 0.66 → 长`。
 /// - 软硬：高光与阴影**两侧**都有显著死白 → 硬；否则软。
 /// - 剪影特例：阴影死白占比高且最暗接近纯黑 → 主体纯黑轮廓。
 pub fn classify_tonality(m: &ImageMetrics) -> Tonality {
     let dr = m.dynamic_range; // max_l − min_l，真实动态范围（与中点放置无关）
 
-    // 基调用**中位数**判：高 DR 图（夜景/逆光）有少量极亮像素把 mean_l 抬高，
-    // 但大面积仍是暗的，中位数才能认出它本该是低调。
-    // 阈值放宽：低调 < 0.45（夜景/逆光普遍 median 0.39–0.46，要守住暗氛围，不被提亮）；
-    // 高调 > 0.58（雪景/日系/亮调人像）。
-    let key = if m.tone.median_l < 0.45 {
-        Key::Low
-    } else if m.tone.median_l > 0.58 {
+    // 基调用**面积比例**判（摄影标准：高调=暗部面积小、低调=亮部面积小，
+    // 即"画面中明暗像素的比例"），而非单点中位数——中位数只代表中间那个像素，
+    // 不反映"亮部占总面积多少"，易把"大面积亮+少量暗"误归中调、把"大面积暗+
+    // 少量亮"误归中调。面积比例直接对应摄影定义（搜狗百科/SHUTTERCOACH/Fstoppers 一致）。
+    //   高调：亮部面积 ≥55% 且 死黑面积 <4% → 画面大部分是亮的、暗部极少
+    //   低调：暗部面积 ≥25% 且 死白面积 <4% → 画面大部分是暗的、亮部极少
+    //   中间调：明暗比例适中（其余）
+    // median_l 作为兜底：极端但面积判据不命中时（如亮背景+大暗主体）仍可归位。
+    let t = &m.tone;
+    let shadow_dead = m.exposure.shadow_clip_pct;
+    let hi_dead = m.exposure.highlight_clip_pct;
+    let is_high = (t.bright_area_pct >= 55.0 && shadow_dead < 4.0) || t.median_l > 0.66;
+    let is_low = (t.dark_area_pct >= 25.0 && hi_dead < 4.0) || t.median_l < 0.36;
+    let key = if is_high {
         Key::High
+    } else if is_low {
+        Key::Low
     } else {
         Key::Mid
     };
@@ -190,7 +199,10 @@ pub fn tonal_adjustments(
         Key::Mid => 0.50,
         Key::High => (median_l + 0.04).min(0.66),
     };
-    let exposure_ev = ((target_med - median_l) / 0.10).clamp(-2.0, 2.0);
+    // 护栏：自动中性化绝不把图压暗（exposure_ev ≥ 0）。
+    // 已足够亮的图（如白墙人像 median_l > target_med）应保持原亮度，
+    // 只做颜色校正（白平衡/去黄/对比度）；用户想暗可手动拉曝光。
+    let exposure_ev = ((target_med - median_l) / 0.10).clamp(0.0, 2.0);
 
     // —— 对比/光比/暗部：按调性 + 基调 ——
     // 低调：绝不整体提亮；只靠 shadow_lift/deep_shadow_lift 找回暗部细节 +
@@ -251,6 +263,119 @@ pub fn tonal_adjustments(
         // 否则 pipeline 不会逐像素套用色彩引擎——这正是「一键智能」有、「自动中性化」
         // 没有的色彩智能差异。ColorPlan 由 auto_neutral_balance 内部已算好（强度 0.8）。
         color_plan: bal.color_plan,
-        mix: 0.9,
+        // 商业审查项3（v0.6.9 修正）：mix 必须恒为 1.0（全效果）。
+        // 历史上这里写 0.9，把最终结果与原图按 10% 混合以「防过曝」，但会让用户在
+        // 自动中性化之后拖动的曝光/对比/亮度等手动调整被 10% 稀释，表现为「调了没反应」。
+        // 过曝防护已由 run_auto 的 is_artifact 护栏闭环负责（越界轮次自动回退），无需此折扣。
+        mix: 1.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analyze::{
+        CastMetrics, ColorMetrics, ExposureMetrics, GamutMetrics, ImageMetrics, SkinMetrics,
+        ToneMetrics,
+    };
+    use image::{DynamicImage, RgbImage};
+
+    /// 构造合成 metrics 直接验证 `classify_tonality` 的面积比例判据，
+    /// 不触发真实的 analyze/auto_neutral_balance（后者依赖完整图像统计）。
+    fn mk_metrics(
+        bright_pct: f32,
+        dark_pct: f32,
+        shadow_dead: f32,
+        hi_dead: f32,
+        median: f32,
+    ) -> ImageMetrics {
+        ImageMetrics {
+            width: 100,
+            height: 100,
+            tone: ToneMetrics {
+                mean_l: median,
+                std_l: 0.2,
+                min_l: 0.0,
+                max_l: 1.0,
+                median_l: median,
+                p25_l: 0.2,
+                p75_l: 0.7,
+                bright_area_pct: bright_pct,
+                dark_area_pct: dark_pct,
+            },
+            color: ColorMetrics {
+                mean_c: 0.1,
+                mean_h_deg: 0.0,
+                hue_peakiness: 0.0,
+                per_hue_chroma: [0.0; 8],
+            },
+            skin: SkinMetrics {
+                ratio: 0.0,
+                mean_c: 0.0,
+                mean_h_deg: 0.0,
+                mean_l: 0.5,
+            },
+            exposure: ExposureMetrics {
+                highlight_clip_pct: hi_dead,
+                shadow_clip_pct: shadow_dead,
+            },
+            gamut: GamutMetrics {
+                clip_pct: 0.0,
+                max_c: 0.0,
+            },
+            cast: CastMetrics {
+                hue_deg: 0.0,
+                chroma: 0.0,
+            },
+            dynamic_range: 0.8,
+        }
+    }
+
+    #[test]
+    fn high_key_by_bright_area_ratio() {
+        // 白墙人像：80% 亮、死黑 <4% → 应判高调（面积比例，非中位数）
+        let m = mk_metrics(80.0, 2.0, 1.0, 1.0, 0.60);
+        assert_eq!(classify_tonality(&m).key, Key::High);
+    }
+
+    #[test]
+    fn low_key_by_dark_area_ratio() {
+        // 夜景/逆光：暗部面积 45%、死白 <4% → 应判低调
+        let m = mk_metrics(10.0, 45.0, 1.0, 1.0, 0.30);
+        assert_eq!(classify_tonality(&m).key, Key::Low);
+    }
+
+    #[test]
+    fn mid_key_when_balanced() {
+        // 明暗比例适中 → 中间调
+        let m = mk_metrics(40.0, 15.0, 1.0, 1.0, 0.50);
+        assert_eq!(classify_tonality(&m).key, Key::Mid);
+    }
+
+    #[test]
+    fn high_key_not_misclassified_mid_by_median() {
+        // 回归：大面积亮但 median 中等（亮背景 + 中等亮度主体）也必须判高调，
+        // 不能因 median 不高而误归中调。
+        let m = mk_metrics(70.0, 5.0, 2.0, 1.0, 0.52);
+        assert_eq!(classify_tonality(&m).key, Key::High);
+    }
+
+    #[test]
+    fn high_key_image_exposure_never_negative() {
+        // 回归：白墙人像（高调）点「自动中性化」不应被压暗（exposure_ev >= 0）。
+        let mut img = RgbImage::new(100, 100);
+        for (x, _y, p) in img.enumerate_pixels_mut() {
+            if x < 82 {
+                *p = image::Rgb([242u8, 242, 242]); // 亮（白墙）
+            } else {
+                *p = image::Rgb([150u8, 125, 110]); // 中等肤色
+            }
+        }
+        let adj = tonal_adjustments(&DynamicImage::ImageRgb8(img), true, 1.0);
+        assert!(
+            adj.exposure_ev >= 0.0,
+            "高调图 exposure_ev 应为非负，实际 {}",
+            adj.exposure_ev
+        );
     }
 }

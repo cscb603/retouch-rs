@@ -12,6 +12,8 @@ pub mod heal;
 pub mod params;
 pub mod perceptual;
 pub mod pipeline;
+// 自动保存会话的序列化/反序列化（崩溃/误关恢复），从 crate 根直接暴露，便于 UI 调用。
+pub use pipeline::{load_session_json, save_session_json};
 pub mod preset;
 pub mod reference;
 pub mod schema;

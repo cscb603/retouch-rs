@@ -51,6 +51,11 @@ pub struct ToneMetrics {
     pub p25_l: f32,
     /// 75th 百分位 L（亮部代表）。
     pub p75_l: f32,
+    /// 亮部面积占比（% 像素 L>0.6）。影调判断用：高调=亮部面积大、暗部面积小。
+    /// 比 median_l 更贴合摄影定义（"画面中明暗像素的比例"），避免单点中位数误判。
+    pub bright_area_pct: f32,
+    /// 暗部面积占比（% 像素 L<0.2）。低调=暗部面积大、亮部面积小。
+    pub dark_area_pct: f32,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -152,6 +157,8 @@ pub fn analyze(img: &DynamicImage) -> ImageMetrics {
     let mut min_l = 1.0f32;
     let mut max_l = 0.0f32;
     let mut hist = [0u64; 256]; // L 直方图（判中位数用）
+    let mut bright_area: u64 = 0; // L>0.6 的像素数（亮部面积占比，影调判断用）
+    let mut dark_area: u64 = 0;   // L<0.2 的像素数（暗部面积占比）
     let mut sum_c = 0.0f64;
     let mut cos_acc = 0.0f64; // hue circular mean accumulator (weighted by C)
     let mut sin_acc = 0.0f64;
@@ -173,6 +180,8 @@ pub fn analyze(img: &DynamicImage) -> ImageMetrics {
         let l = ok.l;
         let lb = (l * 255.0).clamp(0.0, 255.0) as usize;
         hist[lb] += 1;
+        if l > 0.6 { bright_area += 1; }
+        if l < 0.2 { dark_area += 1; }
         sum_l += l as f64;
         sum_l2 += (l as f64) * (l as f64);
         if l < min_l {
@@ -284,6 +293,9 @@ pub fn analyze(img: &DynamicImage) -> ImageMetrics {
         0.0
     };
 
+    let bright_area_pct = (bright_area as f64 / nf * 100.0) as f32;
+    let dark_area_pct = (dark_area as f64 / nf * 100.0) as f32;
+
     ImageMetrics {
         width: w,
         height: h,
@@ -295,6 +307,8 @@ pub fn analyze(img: &DynamicImage) -> ImageMetrics {
             median_l,
             p25_l,
             p75_l,
+            bright_area_pct,
+            dark_area_pct,
         },
         color: ColorMetrics {
             mean_c,

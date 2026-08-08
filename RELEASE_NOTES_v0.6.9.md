@@ -32,11 +32,34 @@
 - 每笔可各自选档位（传统 / 自然 / 精修 / 内容感知）；灵敏度滑块抑制天空等平滑背景的误检。
 - 标注可隐藏、检测圈收紧；撤销一笔 / 清空 / 笔刷大小 / 前后对比 / 相册多图 / 全分辨率导出（MozJPEG 4:4:4）全部保留。
 
-### 下载（仅分享版：两个平台）
-- **macOS（分享版，Retouch）**：`Retouch-0.6.9-macOS.zip` — 发给朋友，右键打开即可
-- **Windows 10 / 11（64 位，分享版）**：`Retouch-0.6.9-windows-x64.zip` — 免 VC++ 运行库，双击即用
+### 本次补强：商业软件标准 4 项（用户实测后拍板）
 
-> 自用版（初色，含个人 Qwen Key）仅供本地自用，不在本仓库分发。源码完全开源、不含任何 Key。
+> 经真实使用对比商业修图软件，补齐 4 个体验短板（之前被标记为「待拍板」，本版全部落地）：
+
+1. **关闭窗口有「未保存更改」提示** —— 有未保存改动时关窗会弹确认框（保存并退出 / 放弃并退出 / 取消），不再 silently 丢失工作。
+2. **打开/拖入支持 WebP / HEIC** —— 之前只收 jpg/jpeg/png/tif；现在 WebP 原生解码、HEIC/HEIF 经 macOS `sips` 转临时 JPEG 回退（零 C 依赖、不碰 Windows 红线）。
+3. **一键中性化不再削弱后续手动调整** —— 旧实现把风险图整体结果按 `mix<1` 与原图混合「防过曝」，副作用是后续拖曝光/对比被 `(1-mix)` 整体打折、像「调了没反应」。改为 `mix` 恒为 1.0，过曝防护交由 `run_auto` 的伪影护栏闭环负责；并加回归测试锁死该不变量。
+4. **自动保存 / 崩溃恢复** —— 每 5 秒节流写 `~/.retouch/autosave.json`（仅未保存且有图时）；启动时若源文件仍在，弹「恢复 / 不恢复」对话框，崩了也能救回进度。
+
+> 以上均经 `cargo test -p retouch-core`（81 passed，含新增 mix 不变量测试）与 `cargo check`（skin / 默认双版）验证。
+
+### 命令行（CLI）引擎
+
+初色**原生支持后台 CLI 调用**（`retouch-cli` crate，二进制名 `retouch-rs`）：
+- `render` 跑 OKLCH 管线、`analyze --json` 量化 OKLCH 指标供 AI 读取、`auto` 一键调色、`name --key <QWEN>` 用 Qwen 起名、`schema --json` 导参数 id、`dump` 固化 preset、`verify` 自检。
+- 全部参数可 `--preset` 作底 + 逐个 `--xxx` 覆盖，或 `--params '{"id":val}'` 按 id 设；适合无头服务器 / 自动化流水线 / Agent 调用。
+- 详见 `README.md` 的「命令行（CLI）调用」与 `crates/retouch-cli`。
+
+### 下载
+
+| 平台 | 文件 | 说明 |
+|---|---|---|
+| macOS 11+（分享版） | `初色-0.6.9-macOS.zip` | 右键打开即用 |
+| Windows 10/11 64 位（**分享版**） | `初色-0.6.9-windows-分享版.zip` | 无 Key，免 VC++ 运行库，双击即用 |
+| Windows 10/11 64 位（**自用版**） | `初色-0.6.9-windows-自用版.zip` | 内置 Qwen Key，AI 追色/命名可用；Key 仅存本地 |
+
+> 每个压缩包内都含「源码」快照（用 `git archive`，自动排除 Key/模型/构建产物），可单独编译研究。
+> 自用版与分享版功能完全一致，区别仅在是否附带 Qwen Key；源码完全开源、不含任何 Key。
 
 ---
 
@@ -53,11 +76,14 @@
 
 **Spot-heal UX (since v0.6.7)**: no auto-detect doubling (`is_auto` marker), PS-style "select then apply" (red selection → green healed), per-stroke heal mode, sensitivity slider, hideable markers, full-resolution MozJPEG 4:4:4 export.
 
-**Download (share builds only: 2 platforms)**
-- macOS (share, Retouch): `Retouch-0.6.9-macOS.zip`
-- Windows 10/11 (64-bit, share): `Retouch-0.6.9-windows-x64.zip`
+**Downloads**
+- macOS 11+ (share): `初色-0.6.9-macOS.zip`
+- Windows 10/11 64-bit (**share, no Key**): `初色-0.6.9-windows-分享版.zip`
+- Windows 10/11 64-bit (**self-use, with Qwen Key**): `初色-0.6.9-windows-自用版.zip`
 
-> Self-use builds (初色, with personal Qwen Key) are for local use only and not distributed here. Source is fully open and contains no Key.
+Each zip bundles a `源码/` snapshot (via `git archive`, excludes Key/models/build artifacts). Self-use and share builds are functionally identical; the only difference is whether the Qwen Key is bundled. Source is fully open and contains no Key.
+
+**CLI engine**: `retouch-rs` (from `retouch-cli`) supports headless invocation — `render`, `analyze --json`, `auto`, `name --key`, `schema --json`, `dump`, `verify`. See `README.md`.
 
 ---
 

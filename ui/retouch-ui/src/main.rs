@@ -20,10 +20,16 @@ use retouch_core::params::{registry, Field, ParamSpec};
 use retouch_core::pipeline::{
     render, smart_beauty_preset, Adjustments, HslRegions, SkinTone, ToneMapMode,
 };
+use retouch_core::advanced::FreqSepSkin;
 use retouch_core::preset::{dump_preset, load_preset, Preset};
 use retouch_core::reference::run_reference_match;
 use retouch_core::spot::{HealMode, SpotFix};
 use retouch_core::tonemap::tonal_adjustments;
+/// TrueSkin 皮肤精修引擎类型（仅 `skin` feature 编译；零训练 ONNX + BiSeNet 语义门控）。
+#[cfg(feature = "skin")]
+use trueskin_core::{
+    prepare_from_infer, ParsingModel, PortraitConfig, PortraitParams, SkinModel, SkinPrep,
+};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -39,6 +45,9 @@ struct RenderRequest {
     adj: Adjustments,
     preview_max: u32,
     need_before: bool,
+    /// 渲染代次：与主线程 load_gen 对齐。切图后旧图的在途渲染回包 gen 不匹配，
+    /// 直接丢弃，避免把上一张图的 base_rgba / before_rgba 写进当前图（对比模式错乱）。
+    gen: u64,
 }
 
 struct RenderResult {
@@ -46,6 +55,7 @@ struct RenderResult {
     after_size: [usize; 2],
     before_rgb: Option<Vec<u8>>,
     before_size: [usize; 2],
+    gen: u64,
 }
 
 /// 后台导入消息：解码线程流式回传缩略图，主线程 poll 逐张追加进相册。
@@ -129,6 +139,8 @@ struct RetouchApp {
     render_tx: Sender<RenderRequest>,
     render_rx: Receiver<RenderResult>,
     render_pending: bool,
+    /// render_pending 开始时间，用于超时检测（防止 render thread 卡死导致预览永久冻结）。
+    render_pending_at: Option<std::time::Instant>,
     /// 导出配置（保存对话框）
     show_export: bool,
     export_cfg: retouch_core::export::ExportConfig,
@@ -193,6 +205,44 @@ struct RetouchApp {
     /// 自动检测灵敏度（DetectParams.contrast_thr）：越低越灵敏（云天易误检）、越高越保守。
     detect_sensitivity: f32,
 
+    // ── 皮肤精修模式（TrueSkin 引擎，仅 `skin` feature）──
+    #[cfg(feature = "skin")]
+    skin_model: Option<SkinModel>,
+    #[cfg(feature = "skin")]
+    skin_parsing: Option<ParsingModel>,
+    /// 「一键优化」的重活预计算缓存（ONNX 输出 + BiSeNet 门控 + 双边低频，算一次）。
+    /// 之后拖滑块/涂笔刷只跑 `compose`（毫秒级），不重跑 ONNX、不重算双边。
+    #[cfg(feature = "skin")]
+    skin_prep: Option<SkinPrep>,
+    /// 局部强度场（base 分辨率，默认全 1.0）：加强修 → >1，恢复 → 0（局部不修）。
+    #[cfg(feature = "skin")]
+    skin_effect: Vec<f32>,
+    /// 三滑块：强度(blemish)/色调(color)/自然度(preserve)。
+    #[cfg(feature = "skin")]
+    skin_params: PortraitParams,
+    /// 笔刷模式：加强修 / 恢复。
+    #[cfg(feature = "skin")]
+    skin_brush_mode: SkinBrushMode,
+    #[cfg(feature = "skin")]
+    skin_brush_size: f32,
+    #[cfg(feature = "skin")]
+    skin_brush_strength: f32,
+    /// 是否已对当前图运行过「一键优化」并应用（决定是否在预览中注入皮肤精修）。
+    #[cfg(feature = "skin")]
+    skin_active: bool,
+    /// 可选「强效祛痘(AI)」叠加层：开启时才跑 TrueSkin 模型做成 spot 修正（默认关）。
+    /// 主可见效果来自「智能美肤」内核（皮肤优化+频谱磨皮），AI 层是额外增强。
+    #[cfg(feature = "skin")]
+    skin_ai_blemish: bool,
+    /// 皮肤精修生效前 `adj.skin` / `adj.advanced.freqsep` 的快照，撤销时还原。
+    #[cfg(feature = "skin")]
+    skin_adj_backup: Option<(SkinTone, FreqSepSkin)>,
+
+    /// 自动检测污点：是否启用「人像五官过滤」（默认关）。
+    /// 关 = 完全恢复原始行为（一检测就出 100+ 点，含眼/唇误检，用户可右键单个取消）；
+    /// 开 = 仅丢弃「强五官区」(眼/唇/鼻概率>0.5) 的候选点，风景图自然不丢。
+    spot_filter_faces: bool,
+
     // ── v0.6.3 响应性：把重解码全部移出主线程，界面不再冻结 ──
     /// 后台导入通道（Some=正在导入）。缩略图解码在线程里做，主线程流式追加。
     import_rx: Option<Receiver<ImportMsg>>,
@@ -211,6 +261,21 @@ struct RetouchApp {
     export_rx: Option<Receiver<ExportMsg>>,
     export_total: usize,
     export_done: usize,
+
+    // ── 未保存提示 / 自动保存（商业标准项1+项4）──
+    /// 自上次导出以来，用户是否改动过参数（关闭前「未保存提示」的依据）。
+    unsaved: bool,
+    /// 关闭窗口时弹出的「未保存更改」确认对话框。
+    show_exit_confirm: bool,
+    /// 启动时检测到上次自动保存会话，是否弹「恢复」对话框。
+    show_restore_dialog: bool,
+    /// 待恢复的自动保存会话（源路径 + 参数）。
+    restore_pending: Option<(PathBuf, Adjustments)>,
+    /// 上次自动保存到磁盘的时刻（节流用，避免每次调参都写盘）。
+    last_autosave: Option<std::time::Instant>,
+    /// 用户在「未保存提示」对话框里已选「退出」后，由关闭拦截消费的待执行动作。
+    /// Some(true)=保留自动保存会话并退出；Some(false)=丢弃会话并退出；None=未决定。
+    pending_exit: Option<bool>,
 }
 
 /// 主题模式：自动（按时段切换深/浅）、始终深色、始终浅色
@@ -258,12 +323,25 @@ enum AutoMode {
     Reference,
 }
 
-/// 工具模式：普通调色 vs 污点修复画笔（v0.6）。
+/// 工具模式：普通调色 vs 污点修复画笔（v0.6）vs 皮肤精修（TrueSkin 引擎，仅 `skin` feature）。
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 enum ToolMode {
     #[default]
     Adjust,
     Spot,
+    #[cfg(feature = "skin")]
+    Skin,
+}
+
+/// 皮肤精修笔刷模式（仅 `skin` feature）。
+#[cfg(feature = "skin")]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+enum SkinBrushMode {
+    /// 加强修：把笔刷覆盖区的精修强度推向更高。
+    #[default]
+    Strengthen,
+    /// 恢复：笔刷覆盖区还原到原图（=局部不修）。
+    Restore,
 }
 
 /// 单图状态容器（相册中的一张）。
@@ -337,6 +415,58 @@ impl Album {
     }
 }
 
+/// 解码图片文件为 DynamicImage。
+/// - 优先用 image crate（原生支持 jpg/png/tif/webp 等常见格式）。
+/// - macOS 额外回退 HEIC/HEIF：调用系统 sips 转临时 JPEG 再解码（零额外依赖）。
+fn decode_image(path: &std::path::Path) -> Result<image::DynamicImage, String> {
+    if let Ok(img) = image::open(path) {
+        return Ok(img);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let ext = ext.to_ascii_lowercase();
+            if ext == "heic" || ext == "heif" {
+                let stem: String = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("img")
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                    .collect();
+                let tmp = std::env::temp_dir()
+                    .join(format!("retouch_heic_{}_{}.jpg", std::process::id(), stem));
+                let ok = std::process::Command::new("sips")
+                    .arg("-s")
+                    .arg("format")
+                    .arg("jpeg")
+                    .arg(path)
+                    .arg("--out")
+                    .arg(&tmp)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if ok {
+                    if let Ok(img) = image::open(&tmp) {
+                        let _ = std::fs::remove_file(&tmp);
+                        return Ok(img);
+                    }
+                }
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+    }
+    Err(format!("无法解码图片：{}", path.display()))
+}
+
+/// 自动保存会话文件路径（~/.retouch/autosave.json）。
+fn autosave_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::Path::new(&home)
+        .join(".retouch")
+        .join("autosave.json")
+}
+
 impl RetouchApp {
     fn new() -> Self {
         let (render_tx, render_rx_thread) = channel::<RenderRequest>();
@@ -349,6 +479,7 @@ impl RetouchApp {
         // to the main thread for GPU upload. This keeps slider dragging smooth.
         std::thread::spawn(move || {
             while let Ok(req) = render_rx_thread.recv() {
+                let g = req.gen;
                 let (w, h) = req.src.dimensions();
                 let scale = (req.preview_max as f32 / w.max(h) as f32).min(1.0);
                 let tw = (w as f32 * scale) as u32;
@@ -358,7 +489,7 @@ impl RetouchApp {
                     .resize(tw, th, image::imageops::FilterType::Triangle);
 
                 // 渲染出错（如极端参数导致 panic）不会炸掉整个 app：
-                // catch_unwind 捕获后跳过本轮渲染，app 继续运行。
+                // catch_unwind 捕获后发送空结果，主线程能恢复 render_pending（不再死锁）。
                 let render_result = std::panic::catch_unwind({
                     let t = thumb.clone();
                     let a = req.adj.clone();
@@ -392,6 +523,7 @@ impl RetouchApp {
                                 after_size,
                                 before_rgb: before.as_ref().map(|(rgb, _)| rgb.clone()),
                                 before_size: before.map(|(_, size)| size).unwrap_or([0, 0]),
+                                gen: g,
                             })
                             .is_err()
                         {
@@ -400,13 +532,21 @@ impl RetouchApp {
                     }
                     Err(e) => {
                         eprintln!("[retouch-rs] render panic: {:?}", e);
-                        // 不发送结果，跳过此帧
+                        // 必须发送空结果让主线程解除 render_pending 死锁，
+                        // 否则之后所有 dirty 更新都被跳过、预览永久冻结。
+                        let _ = result_tx.send(RenderResult {
+                            after_rgb: Vec::new(),
+                            after_size: [0, 0],
+                            before_rgb: None,
+                            before_size: [0, 0],
+                            gen: g,
+                        });
                     }
                 }
             }
         });
 
-        let app = Self {
+        let mut app = Self {
             adj: Adjustments::photo_default(),
             src: None,
             src_path: None,
@@ -451,6 +591,7 @@ impl RetouchApp {
             render_tx,
             render_rx: result_rx,
             render_pending: false,
+            render_pending_at: None,
             show_export: false,
             export_cfg: Default::default(),
             last_open_dir: None,
@@ -480,6 +621,29 @@ impl RetouchApp {
             spot_live: false,
             show_spot_marks: true,
             detect_sensitivity: 25.0,
+            #[cfg(feature = "skin")]
+            skin_model: None,
+            #[cfg(feature = "skin")]
+            skin_parsing: None,
+            #[cfg(feature = "skin")]
+            skin_prep: None,
+            #[cfg(feature = "skin")]
+            skin_effect: Vec::new(),
+            #[cfg(feature = "skin")]
+            skin_params: PortraitParams::default(),
+            #[cfg(feature = "skin")]
+            skin_brush_mode: SkinBrushMode::Strengthen,
+            #[cfg(feature = "skin")]
+            skin_brush_size: 0.05,
+            #[cfg(feature = "skin")]
+            skin_brush_strength: 0.5,
+            #[cfg(feature = "skin")]
+            skin_active: false,
+            #[cfg(feature = "skin")]
+            skin_ai_blemish: false,
+            #[cfg(feature = "skin")]
+            skin_adj_backup: None,
+            spot_filter_faces: false,
             import_rx: None,
             import_base_adj: Adjustments::photo_default(),
             import_total: 0,
@@ -491,7 +655,19 @@ impl RetouchApp {
             export_rx: None,
             export_total: 0,
             export_done: 0,
+            unsaved: false,
+            show_exit_confirm: false,
+            show_restore_dialog: false,
+            restore_pending: None,
+            last_autosave: None,
+            pending_exit: None,
         };
+
+        // 启动恢复：若上次有未保存的自动保存会话且源文件仍在，提示恢复。
+        if let Some((src, adj)) = retouch_core::load_session_json(&autosave_path()) {
+            app.restore_pending = Some((src, adj));
+            app.show_restore_dialog = true;
+        }
 
         app
     }
@@ -548,6 +724,7 @@ impl RetouchApp {
                 let p = if spec.bipolar { pos } else { pos * 2.0 - 1.0 };
                 let new_raw = spec.to_raw(p);
                 spec.field.set(&mut self.adj, new_raw);
+                self.unsaved = true;
             }
 
             // 3. Live value readout — generous spacing from the slider.
@@ -781,12 +958,12 @@ impl RetouchApp {
     /// 导入参考图：分析其指标并显示缩略图（需 ctx 建纹理）。
     fn import_reference(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("图片", &["jpg", "jpeg", "png", "tif", "tiff"])
+            .add_filter("图片", &["jpg", "jpeg", "png", "tif", "tiff", "webp", "heic", "heif"])
             .pick_file()
         else {
             return;
         };
-        match image::open(&path) {
+        match decode_image(&path) {
             Ok(img) => {
                 self.ref_metrics = Some(analyze(&img));
                 self.ref_path = Some(path.clone());
@@ -966,6 +1143,8 @@ impl RetouchApp {
     /// 亮度还原、应用预设等路径都应走它，否则 `to_adjustments()`(写死 geometry 默认)
     /// / `blend_adj()`(geometry 不在注册表) 会把几何清零，导致"调别的参数旋转又回来"。
     fn replace_adj_preserve_geo(&mut self, new: Adjustments) {
+        // 任何经由「整体替换参数」的操作（一键中性/预设/参考匹配/皮肤精修）都视为「已编辑」。
+        self.unsaved = true;
         self.adj = preserve_geometry(&self.adj, new);
     }
 
@@ -1233,7 +1412,11 @@ impl RetouchApp {
                                 if let Some(parent) = path.parent() {
                                     self.last_save_dir = Some(parent.to_path_buf());
                                 }
-                                self.status = self.do_export(&path);
+                                let msg = self.do_export(&path);
+                                if msg.starts_with("✅") {
+                                    self.unsaved = false;
+                                }
+                                self.status = msg;
                                 self.show_export = false;
                             }
                         }
@@ -1248,6 +1431,136 @@ impl RetouchApp {
         }
     }
 
+    // ───────────────────────────────────────────────────────────────────
+    // 项1：关闭拦截「未保存提示」对话框
+    // ───────────────────────────────────────────────────────────────────
+    fn show_exit_confirm_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        egui::Window::new("未保存的更改")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.label("你有一张图片的修图参数尚未导出保存。");
+                    ui.label("要如何处理当前的修图会话？");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("保存会话并退出")
+                            .on_hover_text("保留自动保存的修图参数，下次打开初色时可恢复")
+                            .clicked()
+                        {
+                            // 保留 autosave 文件，下次启动可恢复；放行关闭。
+                            self.unsaved = false;
+                            self.show_exit_confirm = false;
+                            self.pending_exit = Some(true);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        if ui
+                            .button("放弃并退出")
+                            .on_hover_text("删除自动保存的修图参数，不保留本次更改")
+                            .clicked()
+                        {
+                            // 丢弃 autosave；pending_exit=false 在关闭拦截里负责删除文件。
+                            self.unsaved = false;
+                            self.show_exit_confirm = false;
+                            self.pending_exit = Some(false);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        if ui.button("取消").clicked() {
+                            // CancelClose 已发出，关闭被中止；仅隐藏对话框。
+                            self.show_exit_confirm = false;
+                        }
+                    });
+                });
+            });
+        if !open {
+            // 用户点了窗口关闭按钮（×）：等同「取消」。
+            self.show_exit_confirm = false;
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // 项4：启动恢复「自动保存会话」对话框
+    // ───────────────────────────────────────────────────────────────────
+    fn show_restore_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        egui::Window::new("恢复未保存的会话")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.label("检测到上次初色意外关闭时，有一份自动保存的修图会话。");
+                    if let Some((src, _)) = &self.restore_pending {
+                        ui.label(format!("来源：{}", src.display()));
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("恢复").clicked() {
+                            if let Some((src, adj)) = self.restore_pending.take() {
+                                self.restore_session(src, adj);
+                            }
+                            self.show_restore_dialog = false;
+                        }
+                        if ui
+                            .button("不恢复")
+                            .on_hover_text("删除自动保存的会话，以空白状态启动")
+                            .clicked()
+                        {
+                            let _ = std::fs::remove_file(autosave_path());
+                            self.restore_pending = None;
+                            self.show_restore_dialog = false;
+                        }
+                    });
+                });
+            });
+        if !open {
+            // 点 ×：等同「不恢复」。
+            let _ = std::fs::remove_file(autosave_path());
+            self.restore_pending = None;
+            self.show_restore_dialog = false;
+        }
+    }
+
+    /// 同步恢复一份自动保存会话：解码源图、套用参数、重置预览缓存。
+    /// 在恢复对话框的点击处理里调用——一次性阻塞可接受（避免与异步 load 竞态）。
+    fn restore_session(&mut self, path: PathBuf, adj: Adjustments) {
+        #[cfg(feature = "skin")]
+        {
+            self.skin_prep = None;
+            self.skin_active = false;
+            self.skin_effect.clear();
+        }
+        match decode_image(&path) {
+            Ok(img) => {
+                self.img_metrics = Some(analyze(&img));
+                self.src = Some(img);
+                self.src_path = Some(path.clone());
+                self.adj = adj;
+                self.texture = None;
+                self.base_rgba = None;
+                self.before_rgba = None;
+                self.dirty = true;
+                self.dirty_geo = false;
+                self.spot_live = false;
+                self.loading = false;
+                self.unsaved = true;
+                self.last_autosave = None; // 触发尽快重新落盘同一份会话
+                self.status = format!("已恢复未保存的会话 {}", path.display());
+            }
+            Err(e) => {
+                self.status = format!("恢复失败（源图可能已被移动/删除）: {}", e);
+                // 恢复不了也清掉 autosave，避免下次启动再次弹出。
+                let _ = std::fs::remove_file(autosave_path());
+                self.restore_pending = None;
+            }
+        }
+    }
+
     /// Execute the full export pipeline (render + resize + sharpen + border +
     /// sRGB + EXIF + DPI) and write to disk. Returns a status message.
     fn do_export(&self, path: &std::path::Path) -> String {
@@ -1255,6 +1568,14 @@ impl RetouchApp {
             Some(s) => s,
             None => return "错误: 无源图".into(),
         };
+
+        // 皮肤精修：预览里看到的效果必须原样出现在导出图里。
+        // 缓存是预览分辨率(≤1400px)的，这里把 Δ 场上采样后施加到全分辨率原图
+        // （只加平滑修正、不重算双边，毛孔细节 100% 保留，也不用等几十秒）。
+        #[cfg(feature = "skin")]
+        let skinned = self.skin_apply_export(src);
+        #[cfg(feature = "skin")]
+        let src = skinned.as_ref().unwrap_or(src);
 
         let data = retouch_core::export::export_image(
             src,
@@ -1279,7 +1600,7 @@ impl RetouchApp {
     /// 不全解码原图进内存。导入即用「上一张参数」作起点（首张用照片默认）。
     fn open(&mut self) {
         let mut dialog =
-            rfd::FileDialog::new().add_filter("图片", &["jpg", "jpeg", "png", "tif", "tiff"]);
+            rfd::FileDialog::new().add_filter("图片", &["jpg", "jpeg", "png", "tif", "tiff", "webp", "heic", "heif"]);
         if let Some(dir) = &self.last_open_dir {
             dialog = dialog.set_directory(dir);
         }
@@ -1311,12 +1632,10 @@ impl RetouchApp {
         }
         let capped: Vec<PathBuf> = paths.into_iter().take(50).collect();
         let total = capped.len();
-        // 起点参数：沿用当前工作 adj（若已有图），否则照片默认。
-        self.import_base_adj = if self.album.is_empty() {
-            Adjustments::photo_default()
-        } else {
-            self.adj.clone()
-        };
+        // 起点参数：商业软件标准——首张图 = 原图零修改（绝不自动套调味），
+        // 后续图沿用当前工作参数。
+        self.import_base_adj =
+            Adjustments::import_baseline_adj(self.album.is_empty(), &self.adj);
         // 清空相册，准备流式导入。
         self.album = Album {
             slots: Vec::new(),
@@ -1330,7 +1649,7 @@ impl RetouchApp {
         std::thread::spawn(move || {
             for path in capped {
                 // 仅解码到 ≤512px 缩略图，不全解码原图。
-                let thumb = image::open(&path).ok().map(|img| {
+                let thumb = decode_image(&path).ok().map(|img| {
                     let (w, h) = img.dimensions();
                     let scale = (512.0 / w.max(h) as f32).min(1.0);
                     let tw = (w as f32 * scale) as u32;
@@ -1445,6 +1764,14 @@ impl RetouchApp {
     /// 用户快速连点缩略图时旧结果自动丢弃，绝不错图。
     /// 后台全分辨率解码入口（走快速路径：zune-jpeg 优先于 image crate）。
     fn spawn_load(&mut self, path: PathBuf) {
+        // 皮肤精修缓存是「当前这张图 + 当前预览分辨率」专属的，换图必须丢掉，
+        // 否则残留状态会套到新图上（compose 里虽有尺寸校验，但状态显示会骗人）。
+        #[cfg(feature = "skin")]
+        {
+            self.skin_prep = None;
+            self.skin_active = false;
+            self.skin_effect.clear();
+        }
         self.load_gen = self.load_gen.wrapping_add(1);
         let gen = self.load_gen;
         self.loading = true;
@@ -1458,7 +1785,7 @@ impl RetouchApp {
         self.status = "载入中…".into();
         let tx = self.load_tx.clone();
         std::thread::spawn(move || {
-            let result = match image::open(&path) {
+            let result = match decode_image(&path) {
                 Ok(img) => {
                     let metrics = analyze(&img);
                     Ok((img, metrics))
@@ -1489,6 +1816,7 @@ impl RetouchApp {
                             self.dirty_geo = false;
                             self.spot_live = false; // 新图回到「只显示选区」视图
                             self.status = format!("已打开 {}", msg.path.display());
+                            self.unsaved = false; // 新图加载完成：以「未编辑」状态起步
                         }
                         Err(e) => {
                             self.src = None;
@@ -1516,6 +1844,341 @@ impl RetouchApp {
         self.status = format!("智能美肤 A（强度 {}%）", (s * 100.0) as i32);
     }
 
+    // ═══ 皮肤精修模式（TrueSkin 引擎，仅 `skin` feature）═══
+
+    /// 运行时定位 onnxruntime dylib：打包 .app 在 Frameworks，dev 在 target 或 vendor/。
+    #[cfg(feature = "skin")]
+    fn resolve_ort_dylib() -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let exe_dir = exe.parent()?;
+        let candidates = [
+            exe_dir.join("libonnxruntime.1.28.0.dylib"),
+            exe_dir.join("libonnxruntime.dylib"),
+            exe_dir.join("../Frameworks/libonnxruntime.1.28.0.dylib"),
+            exe_dir.join("../Frameworks/libonnxruntime.dylib"),
+            PathBuf::from("vendor/onnxruntime/libonnxruntime.dylib"),
+            PathBuf::from("target/debug/libonnxruntime.1.28.0.dylib"),
+            PathBuf::from("target/release/libonnxruntime.1.28.0.dylib"),
+        ];
+        candidates.into_iter().find(|p| p.exists())
+    }
+
+    /// 定位模型文件：打包 .app 的 Resources/models、dev 的 models/、vendor。
+    #[cfg(feature = "skin")]
+    fn resolve_skin_model_paths() -> (Option<PathBuf>, Option<PathBuf>) {
+        let exe = std::env::current_exe().ok();
+        let exe_dir = exe.as_ref().and_then(|e| e.parent().map(|p| p.to_path_buf()));
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        if let Some(d) = &exe_dir {
+            dirs.push(d.join("../Resources/models"));
+            dirs.push(d.join("models"));
+        }
+        dirs.push(PathBuf::from("models"));
+        dirs.push(PathBuf::from("../models"));
+        let mut skin = None;
+        let mut parsing = None;
+        for d in &dirs {
+            if skin.is_none() {
+                let p = d.join("poc.onnx");
+                if p.exists() {
+                    skin = Some(p);
+                }
+            }
+            if parsing.is_none() {
+                let p = d.join("resnet18_parsing.onnx");
+                if p.exists() {
+                    parsing = Some(p);
+                }
+            }
+            if skin.is_some() && parsing.is_some() {
+                break;
+            }
+        }
+        (skin, parsing)
+    }
+
+    /// 懒加载皮肤精修引擎（skin 模型 + BiSeNet 解析模型），首次使用时调用。
+    #[cfg(feature = "skin")]
+    fn ensure_skin_models(&mut self) {
+        if self.skin_model.is_some() && self.skin_parsing.is_some() {
+            return;
+        }
+        // 先设 ORT_DYLIB_PATH，确保 load-dynamic 能找到随包/本地 dylib。
+        if let Some(dylib) = Self::resolve_ort_dylib() {
+            std::env::set_var("ORT_DYLIB_PATH", dylib.as_os_str());
+        }
+        let (skin_path, parsing_path) = Self::resolve_skin_model_paths();
+        match (skin_path, parsing_path) {
+            (Some(sp), Some(pp)) => {
+                let sp_s = sp.to_str().unwrap_or("").to_string();
+                let pp_s = pp.to_str().unwrap_or("").to_string();
+                match (SkinModel::load(&sp_s), ParsingModel::load(&pp_s)) {
+                    (Ok(m), Ok(p)) => {
+                        self.skin_model = Some(m);
+                        self.skin_parsing = Some(p);
+                        self.status = "皮肤精修引擎已加载（TrueSkin ONNX + BiSeNet 语义门控）".into();
+                    }
+                    (m, p) => {
+                        let mut msg = String::from("皮肤精修模型加载失败：");
+                        if let Err(e) = m {
+                            msg.push_str(&format!("skin={e}; "));
+                        }
+                        if let Err(e) = p {
+                            msg.push_str(&format!("parsing={e}"));
+                        }
+                        self.status = msg;
+                    }
+                }
+            }
+            _ => {
+                self.status = "未找到皮肤精修模型（models/poc.onnx + resnet18_parsing.onnx）。请确认已放入 models/ 或打包 Resources/models。".into();
+            }
+        }
+    }
+
+    /// 把局部强度场 `skin_effect` 重置为当前 base 尺寸、全 1.0（= 模型默认强度）。
+    #[cfg(feature = "skin")]
+    fn skin_effect_reset(&mut self) {
+        let (w, h) = (self.base_size[0], self.base_size[1]);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let n = w * h;
+        if self.skin_effect.len() != n {
+            self.skin_effect = vec![1.0f32; n];
+        } else {
+            self.skin_effect.fill(1.0);
+        }
+    }
+
+    /// 「一键优化」：对当前 base 跑 TrueSkin 模型 + BiSeNet 门控，缓存输出供滑块/笔刷实时复用。
+    #[cfg(feature = "skin")]
+    /// 把三滑块（强度/色调/自然度）映射到 `self.adj` 的 skin + advanced.freqsep 字段，
+    /// 复用已验证的「智能美肤」内核（皮肤优化 + 频谱磨皮，保留毛孔）。
+    /// 渲染线程会把 `self.adj` 立刻反映到预览——所以「一键精修皮肤」现在肉眼可见。
+    #[cfg(feature = "skin")]
+    fn skin_sync_adj(&mut self) {
+        let blemish = self.skin_params.blemish.clamp(0.0, 1.0);
+        let color = self.skin_params.color.clamp(0.0, 1.0);
+        let preserve = self.skin_params.preserve.clamp(0.0, 1.0);
+
+        let mut a = smart_beauty_preset();
+        // 强度 → 皮肤优化 + 频谱磨皮力度（0.4..1.0 区间，最弱不重、最强不假面）
+        let k = 0.4 + 0.6 * blemish;
+        a.skin.strength = (a.skin.strength * k).clamp(0.0, 1.0);
+        a.advanced.freqsep.strength = (a.advanced.freqsep.strength * k).clamp(0.0, 1.0);
+        // 色调 → 去黄 + 粉嫩（肤色均匀、去暗沉/泛红）
+        a.skin.yellow_reduce = color;
+        a.skin.pinken = (color * 0.6).clamp(0.0, 1.0);
+        // 自然度 → 保留毛孔纹理（越高越保毛孔、越不假面）
+        a.advanced.freqsep.texture_keep = (0.4 + 0.5 * preserve).clamp(0.0, 1.0);
+
+        // 首次生效前快照，撤销时还原（不误伤用户在调色面板手动设的 skin/freqsep）
+        if self.skin_adj_backup.is_none() {
+            self.skin_adj_backup =
+                Some((self.adj.skin.clone(), self.adj.advanced.freqsep.clone()));
+        }
+        self.adj.skin = a.skin;
+        self.adj.advanced.freqsep = a.advanced.freqsep;
+        self.dirty = true;
+    }
+
+    fn skin_one_click(&mut self) {
+        let [bw, bh] = self.base_size;
+        if bw == 0 || bh == 0 {
+            self.status = "请先导入图片".into();
+            return;
+        }
+        // 主可见效果：复用已验证的「智能美肤」内核（皮肤优化 + 频谱磨皮），
+        // 三滑块经 skin_sync_adj 映射到 self.adj，预览渲染线程立刻可见。
+        #[cfg(feature = "skin")]
+        self.skin_sync_adj();
+        #[cfg(feature = "skin")]
+        {
+            self.skin_active = true;
+        }
+
+        // 可选「强效祛痘(AI)」叠加层：仅当开关开启时才跑 TrueSkin 模型做 spot 修正。
+        #[cfg(feature = "skin")]
+        if self.skin_ai_blemish {
+            let Some(rgb) = self
+                .base_rgba
+                .as_ref()
+                .and_then(|b| image::RgbImage::from_raw(bw as u32, bh as u32, b.clone()))
+            else {
+                self.status = "请先导入图片".into();
+                return;
+            };
+            self.ensure_skin_models();
+            let (Some(model), Some(parsing)) = (&mut self.skin_model, &mut self.skin_parsing) else {
+                return;
+            };
+            let t0 = std::time::Instant::now();
+            match model.infer(&rgb) {
+                Ok(out) => match parsing.gate(&rgb) {
+                    Ok(gate) => {
+                        let cfg = PortraitConfig::from_params(self.skin_params);
+                        match prepare_from_infer(&rgb, &out, Some(&gate), &cfg) {
+                            Ok(p) => {
+                                self.skin_prep = Some(p);
+                                self.skin_effect_reset();
+                                self.dirty_geo = true;
+                                let ms = t0.elapsed().as_millis();
+                                self.status = format!(
+                                    "皮肤精修已生效（智能美肤内核 + AI 祛痘叠加，{ms}ms）。拖滑块实时微调，保存/导出即所见"
+                                );
+                            }
+                            Err(e) => self.status = format!("AI 祛痘预计算失败：{e}"),
+                        }
+                    }
+                    Err(e) => self.status = format!("BiSeNet 门控失败：{e}"),
+                },
+                Err(e) => self.status = format!("TrueSkin 推理失败：{e}"),
+            }
+        } else {
+            // 仅智能美肤内核：不跑模型，皮肤精修预览即所见。
+            self.skin_prep = None;
+            self.skin_effect_reset();
+            self.dirty_geo = true;
+            self.status =
+                "皮肤精修已生效（智能美肤内核）。拖滑块实时微调，保存/导出即所见；按住 \\ 键看原图".into();
+        }
+    }
+
+    /// 预览注入：在几何变换**之前**、base 分辨率上重合成皮肤精修结果。
+    /// 与污点修复在几何之后不同——皮肤精修的缓存（w_map/gate/effect）都是 base 坐标系的。
+    #[cfg(feature = "skin")]
+    fn skin_apply_preview(&self, img: image::RgbImage) -> image::RgbImage {
+        if !self.skin_active {
+            return img;
+        }
+        let Some(prep) = &self.skin_prep else {
+            return img;
+        };
+        if prep.dims() != img.dimensions() {
+            return img; // 图换了/尺寸不符，缓存失效，原样返回
+        }
+        let cfg = PortraitConfig::from_params(self.skin_params);
+        let effect = if self.skin_effect.len() == prep.len() {
+            Some(self.skin_effect.as_slice())
+        } else {
+            None
+        };
+        prep.compose(&cfg, effect)
+    }
+
+    /// 导出路径：把预览分辨率算出的皮肤精修 Δ 场，上采样施加到**全分辨率**原图。
+    /// 没开启精修 / 缓存失效时返回 `None`（调用方沿用原图）。
+    #[cfg(feature = "skin")]
+    fn skin_apply_export(&self, src: &image::DynamicImage) -> Option<image::DynamicImage> {
+        if !self.skin_active {
+            return None;
+        }
+        let prep = self.skin_prep.as_ref()?;
+        let cfg = PortraitConfig::from_params(self.skin_params);
+        let effect = if self.skin_effect.len() == prep.len() {
+            Some(self.skin_effect.as_slice())
+        } else {
+            None
+        };
+        let delta = prep.compose_delta(&cfg, effect);
+        let rgb = src.to_rgb8();
+        Some(image::DynamicImage::ImageRgb8(trueskin_core::apply_skin_delta(&rgb, &delta)))
+    }
+
+    /// 在局部强度场 `skin_effect` 上涂一笔（`cx`/`cy` 为归一化 base 坐标）。
+    /// 加强修 → 推向 2.0（最多两倍力度）；恢复原样 → 推向 0.0（该处完全不修）。
+    /// 边缘做二次羽化，多涂几次会累积，避免硬边和一次到位。
+    #[cfg(feature = "skin")]
+    fn skin_paint_effect(&mut self, cx: f32, cy: f32) {
+        let (w, h) = (self.base_size[0], self.base_size[1]);
+        if w == 0 || h == 0 {
+            return;
+        }
+        if self.skin_effect.len() != w * h {
+            self.skin_effect_reset();
+        }
+        if self.skin_effect.len() != w * h {
+            return;
+        }
+        let short = w.min(h) as f32;
+        let r = (self.skin_brush_size * short).max(2.0);
+        let px = cx * w as f32;
+        let py = cy * h as f32;
+        let target = match self.skin_brush_mode {
+            SkinBrushMode::Strengthen => 2.0f32,
+            SkinBrushMode::Restore => 0.0f32,
+        };
+        let strength = self.skin_brush_strength.clamp(0.05, 1.0);
+        let x0 = (px - r).floor().max(0.0) as usize;
+        let x1 = (px + r).ceil().clamp(0.0, w as f32 - 1.0) as usize;
+        let y0 = (py - r).floor().max(0.0) as usize;
+        let y1 = (py + r).ceil().clamp(0.0, h as f32 - 1.0) as usize;
+        let r2 = r * r;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let dx = x as f32 - px;
+                let dy = y as f32 - py;
+                let d2 = dx * dx + dy * dy;
+                if d2 > r2 {
+                    continue;
+                }
+                let t = 1.0 - (d2 / r2).sqrt();
+                let a = (t * t * strength).clamp(0.0, 1.0);
+                let i = y * w + x;
+                let v = self.skin_effect[i];
+                self.skin_effect[i] = v + (target - v) * a;
+            }
+        }
+        self.dirty_geo = true;
+    }
+
+    /// 「撤销」：丢弃本次精修效果，回到未精修状态。
+    /// 还原生效前快照的 skin / freqsep（只撤皮肤精修，不误伤其它调整）。
+    #[cfg(feature = "skin")]
+    fn skin_discard(&mut self) {
+        if let Some((s, f)) = self.skin_adj_backup.take() {
+            self.adj.skin = s;
+            self.adj.advanced.freqsep = f;
+        } else {
+            self.adj.skin = SkinTone::default();
+            self.adj.advanced.freqsep = FreqSepSkin::default();
+        }
+        self.skin_prep = None;
+        self.skin_active = false;
+        self.skin_effect.clear();
+        self.skin_params = PortraitParams::default();
+        self.skin_adj_backup = None;
+        self.dirty = true;
+        self.dirty_geo = true;
+        self.status = "已撤销皮肤精修，回到原始画面".into();
+    }
+
+    /// 采样某候选笔触中心+半径内的 skin gate 均值（用于 §2b 语义过滤）。关联函数，不借用 self。
+    #[cfg(feature = "skin")]
+    fn skin_gate_value_at(gate: &[f32], w: usize, h: usize, cx: f32, cy: f32, r_norm: f32) -> f32 {
+        let px = (cx * w as f32) as i32;
+        let py = (cy * h as f32) as i32;
+        let rad = (r_norm * (w.min(h) as f32)).max(1.0) as i32;
+        let mut sum = 0.0f32;
+        let mut cnt = 0i32;
+        for dy in -rad..=rad {
+            for dx in -rad..=rad {
+                let x = px + dx;
+                let y = py + dy;
+                if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                    sum += gate[y as usize * w + x as usize];
+                    cnt += 1;
+                }
+            }
+        }
+        if cnt > 0 {
+            sum / cnt as f32
+        } else {
+            0.0
+        }
+    }
+
     /// 批量导出：遍历选中 slot，各自解原图→apply(adj)→inpaint(spot)→写盘。
     /// 单张失败不中断，末了报告成功/失败数。文件名：作品名优先→源文件名→冲突加序号。
     fn batch_export(&mut self, dir: PathBuf) {
@@ -1531,6 +2194,14 @@ impl RetouchApp {
         // 先把当前工作副本落回活跃 slot：否则「刚调完这张就直接批量导出」时，
         // 本张导出的会是上次切图时的旧参数/旧污点（改动只在切图时写回 slot）。
         self.sync_active_slot();
+        // 皮肤精修是「当前这张图」的独立缓存，没有存进 slot，批量导出带不上。
+        // 明确告诉用户，别让他以为批量出来的图也修过皮肤。
+        #[cfg(feature = "skin")]
+        if self.skin_active {
+            self.status =
+                "注意：批量导出不包含皮肤精修（那是当前这张图专属的）。要带精修请用「保存」单张导出。"
+                    .into();
+        }
         let cfg = self.export_cfg.clone();
         let ext = cfg.output_format.ext().to_string();
         // 主线程预生成 job（含去重文件名），把重活（解码/导出/写盘）交给后台线程。
@@ -1574,7 +2245,7 @@ impl RetouchApp {
                 // 单张 catch_unwind：任何一张的极端参数/写盘异常都不拖垮整批。
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                     || -> Result<(), String> {
-                        let src = image::open(&job.path).map_err(|e| e.to_string())?;
+                        let src = decode_image(&job.path).map_err(|e| e.to_string())?;
                         let data = retouch_core::export::export_image(
                             &src,
                             &job.adj,
@@ -1716,11 +2387,13 @@ impl RetouchApp {
             "factory" => {
                 self.adj = Adjustments::photo_default();
                 self.dirty = true;
+                self.unsaved = true;
                 self.status = "已应用照片默认".into();
             }
             "reset" => {
                 self.adj = Adjustments::default();
                 self.dirty = true;
+                self.unsaved = true;
                 self.status = "已重置 (恒等)".into();
             }
             "dump" => {
@@ -2235,9 +2908,34 @@ impl RetouchApp {
                 ui.horizontal(|ui| {
                     if ui
                         .button("✨ 自动检测污点")
-                        .on_hover_text("自动检测传感器灰尘/亮斑/暗点并生成修复笔触；每次点击会覆盖上次自动结果，手动笔触保留；点「保存」或「导出」才实际应用修复。")
+                        .on_hover_text("自动检测传感器灰尘/亮斑/暗点并生成选区（默认全部保留，一检测出 100+ 点）；误检可在图上对准红圈右键单个取消；想自动剔除眼/唇/鼻误检可勾选「人像五官过滤」。每次点击覆盖上次自动结果，手动笔触保留。")
                         .clicked()
                     {
+                        // 仅当开启「人像五官过滤」才跑 BiSeNet feature_gate（眼睛+唇+鼻概率），
+                        // 用于保守剔除五官误检；默认关 → 不跑模型、不过滤。
+                        // 在 match 之前算好（此时未借用 self.base_rgba，避免与 `skin_parsing` 可变借用冲突）。
+                        #[cfg(feature = "skin")]
+                        let spot_feat: Option<Vec<f32>> = if self.spot_filter_faces {
+                            // 仅当用户开启「人像五官过滤」才跑 BiSeNet feature_gate
+                            // （眼睛+唇+鼻概率），用来保守丢弃明显落在五官上的候选污点。
+                            // 默认关 → 完全不跑模型、不动任何检测点（恢复原始 100+ 点水平）。
+                            let rgb = match (&self.base_rgba, self.base_size) {
+                                (Some(rgba), [bw, bh]) if bw > 0 && bh > 0 =>
+                                    image::RgbImage::from_raw(
+                                        bw as u32,
+                                        bh as u32,
+                                        rgba.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2]]).collect(),
+                                    ),
+                                _ => None,
+                            };
+                            self.ensure_skin_models();
+                            match (rgb, self.skin_parsing.as_mut()) {
+                                (Some(rgb), Some(p)) => p.feature_gate(&rgb).ok(),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
                         match (&self.base_rgba, self.base_size) {
                             (Some(rgba), [bw, bh]) if bw > 0 && bh > 0 => {
                                 let t0 = std::time::Instant::now();
@@ -2265,23 +2963,64 @@ impl RetouchApp {
                                     // 每次自动检测都覆盖上一次的自动笔触，避免连点翻倍；
                                     // 手动笔触保留不动。检测出的点用「当前档位」作为各自档位。
                                     spot.clear_auto_strokes();
+                                    let mut filtered = 0usize;
                                     for s in strokes {
+                                    // 「人像五官过滤」开关开启时，才用 BiSeNet feature_gate 保守丢弃
+                                    // 明显落在眼睛/嘴唇/鼻子上的候选点（feature_gate>0.5）。
+                                    // 默认关 → 不过滤，恢复原始「一检测出 100+ 点」的水平，
+                                    // 多余误检用户在图上右键单个取消即可。
+                                    #[cfg(feature = "skin")]
+                                    let drop_it = match spot_feat.as_deref() {
+                                        Some(g) if g.len() == bw * bh => {
+                                            Self::skin_gate_value_at(
+                                                g, bw, bh, s.cx, s.cy, s.r_norm,
+                                            ) > 0.5
+                                        }
+                                        _ => false,
+                                    };
+                                    #[cfg(not(feature = "skin"))]
+                                    let drop_it = false;
+                                        if drop_it {
+                                            filtered += 1;
+                                            continue;
+                                        }
                                         spot.add_auto_stroke(s.cx, s.cy, s.r_norm, self.heal_mode);
                                     }
+                                    let kept = n - filtered;
                                     // 回到「只显示选区」视图：先让用户看到红圈选区，
                                     // 再点「应用修复」才在预览里真正愈合（贴合 PS 心智）。
                                     self.spot_live = false;
                                     self.dirty_geo = true;
-                                    self.status = format!(
-                                        "已生成 {} 处选区（红圈，{}ms）。点「应用修复」查看修复效果；误检多可调高灵敏度",
-                                        n, ms
-                                    );
+                                    #[cfg(feature = "skin")]
+                                    let feat_missing = self.spot_filter_faces && spot_feat.is_none();
+                                    #[cfg(not(feature = "skin"))]
+                                    let feat_missing = false;
+                                    self.status = if filtered > 0 {
+                                        format!(
+                                            "已生成 {kept} 处选区（红圈，{ms}ms）；人像五官过滤自动剔除 {filtered} 处误检（眼/唇/鼻）。点「应用修复」查看效果；多余的可在图上右键单个取消",
+                                        )
+                                    } else if feat_missing {
+                                        format!(
+                                            "已生成 {kept} 处选区（红圈，{ms}ms）。已开启「人像五官过滤」但未找到 BiSeNet 模型，未过滤；多余误检可在图上右键单个取消",
+                                        )
+                                    } else {
+                                        format!(
+                                            "已生成 {kept} 处选区（红圈，{ms}ms）。点「应用修复」查看修复效果；误检多可在图上右键单个取消，或勾选「人像五官过滤」自动剔除眼/唇/鼻误检",
+                                        )
+                                    };
                                 }
                             }
                             _ => self.status = "请先打开图片".into(),
                         }
                     }
                     ui.label("（仅生成选区，不立即修复）");
+                });
+                // 「人像五官过滤」：默认关——自动检测照常出 100+ 点；
+                // 开启后 BiSeNet 识别眼/唇/鼻，自动丢弃落在这三处的候选点（风景图无影响）。
+                ui.horizontal(|ui| {
+                    #[cfg(feature = "skin")]
+                    ui.checkbox(&mut self.spot_filter_faces, "人像五官过滤")
+                        .on_hover_text("开启后，自动检测会用 AI 语义识别丢弃明显落在眼睛/嘴唇/鼻子上的候选点（减少这三类误检）。默认关：检测照常出全部点，误检你在图上右键单个取消即可。风景/静物图无影响");
                 });
                 // 应用修复 / 撤销应用：PS 心智——选区出来后，点「应用修复」才在预览里真正愈合。
                 ui.horizontal(|ui| {
@@ -2368,6 +3107,193 @@ impl RetouchApp {
             });
             ui.separator();
         }
+
+        // ═══ 皮肤精修（TrueSkin 引擎，仅 Skin 模式显示）═══
+        #[cfg(feature = "skin")]
+        if self.tool_mode == ToolMode::Skin {
+            let mut params = self.skin_params;
+            let mut params_changed = false;
+            let mut do_one_click = false;
+            let mut do_discard = false;
+            let mut do_reset_brush = false;
+            let active = self.skin_active;
+
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("皮肤精修").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "让肤色均匀、瑕疵变淡。毛孔纹理原样保留，不会磨成假面；\
+                         复用已验证的「智能美肤」内核（皮肤优化 + 频谱磨皮），所见即所得。",
+                    )
+                    .weak()
+                    .size(11.0),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("✨ 一键优化")
+                        .on_hover_text(
+                            "跑一次皮肤分析（几秒）。之后拖下面的滑块、涂笔刷都是实时的，不用重跑。",
+                        )
+                        .clicked()
+                    {
+                        do_one_click = true;
+                    }
+                    if active {
+                        ui.label(
+                            egui::RichText::new("● 效果已生效（预览中）")
+                                .color(egui::Color32::from_rgb(76, 175, 80))
+                                .size(12.0),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("尚未生成——先点「一键优化」")
+                                .weak()
+                                .size(12.0),
+                        );
+                    }
+                });
+
+                ui.add_space(6.0);
+                #[cfg(feature = "skin")]
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut self.skin_ai_blemish, "强效祛痘 (AI)")
+                        .on_hover_text("额外跑 TrueSkin 模型做局部斑点祛除，叠加在智能美肤内核之上。默认关；开启多花几秒，且模型对真实痘印召回有限")
+                        .changed()
+                    {
+                        self.skin_one_click();
+                    }
+                });
+                ui.label(egui::RichText::new("微调").size(12.0).strong());
+                ui.horizontal(|ui| {
+                    ui.label("强度");
+                    if ui
+                        .add(egui::Slider::new(&mut params.blemish, 0.0..=1.0).fixed_decimals(2))
+                        .on_hover_text("瑕疵消除力度：痘印/色斑/红血丝淡化多少。调到 0 = 完全不修")
+                        .changed()
+                    {
+                        params_changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("色调");
+                    if ui
+                        .add(egui::Slider::new(&mut params.color, 0.0..=1.0).fixed_decimals(2))
+                        .on_hover_text("肤色均匀程度：去泛红/暗沉/发黄的比例。偏高会让肤色更「干净」，过高可能失真")
+                        .changed()
+                    {
+                        params_changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("自然度");
+                    if ui
+                        .add(egui::Slider::new(&mut params.preserve, 0.0..=1.0).fixed_decimals(2))
+                        .on_hover_text("好皮肤保留度：越高越只修最明显的瑕疵、越不碰本来就好的皮肤（推荐 0.8 左右）")
+                        .changed()
+                    {
+                        params_changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("预设").size(12.0));
+                    if ui.button("轻微").on_hover_text("几乎看不出修过，只压最明显的瑕疵").clicked() {
+                        params = PortraitParams { blemish: 0.35, color: 0.25, preserve: 0.90 };
+                        params_changed = true;
+                    }
+                    if ui.button("标准").on_hover_text("日常人像推荐档（默认）").clicked() {
+                        params = PortraitParams::default();
+                        params_changed = true;
+                    }
+                    if ui.button("加强").on_hover_text("瑕疵较多时用；注意别过头").clicked() {
+                        params = PortraitParams { blemish: 0.85, color: 0.60, preserve: 0.65 };
+                        params_changed = true;
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("局部画笔").strong());
+                ui.label(
+                    egui::RichText::new("在图上涂：加强修 = 这块多修一点；恢复原样 = 这块别修。")
+                        .weak()
+                        .size(11.0),
+                );
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut self.skin_brush_mode,
+                        SkinBrushMode::Strengthen,
+                        "加强修",
+                    )
+                    .on_hover_text("涂过的地方修得更狠一点（最多 2 倍）");
+                    ui.selectable_value(
+                        &mut self.skin_brush_mode,
+                        SkinBrushMode::Restore,
+                        "恢复原样",
+                    )
+                    .on_hover_text("涂过的地方还原成没修的样子（比如想留住痣、雀斑、酒窝）");
+                    if ui.button("重置画笔").on_hover_text("清掉所有局部涂抹，回到整体参数的效果").clicked() {
+                        do_reset_brush = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("笔刷大小");
+                    ui.add(
+                        egui::Slider::new(&mut self.skin_brush_size, 0.01..=0.25)
+                            .fixed_decimals(3),
+                    )
+                    .on_hover_text("相对画面短边的比例；也可用 [ / ] 快捷键");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("笔刷力度");
+                    ui.add(
+                        egui::Slider::new(&mut self.skin_brush_strength, 0.05..=1.0)
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text("每一笔的作用强度，多涂几次会累积");
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button("↩ 撤销精修")
+                    .on_hover_text("丢掉这次精修，回到原来的皮肤")
+                    .clicked()
+                {
+                    do_discard = true;
+                }
+                ui.label(
+                    egui::RichText::new("效果实时生效，保存/导出即所见；按住 \\ 键看原图")
+                        .weak()
+                        .size(11.0),
+                );
+            });
+
+            // 闭包外统一落地状态改动，避免在 ui 闭包里重复可变借用 self。
+            if params_changed {
+                self.skin_params = params;
+                // 已生效则把三滑块实时映射到 adj（智能美肤内核），预览立刻更新。
+                if self.skin_active {
+                    self.skin_sync_adj();
+                }
+            }
+            if do_reset_brush {
+                self.skin_effect_reset();
+                self.dirty_geo = true;
+                self.status = "已重置局部画笔".into();
+            }
+            if do_one_click {
+                self.skin_one_click();
+            }
+            if do_discard {
+                self.skin_discard();
+            }
+            ui.separator();
+        }
+
         // 顶部主操作：一键中性化（纯算法、零 key）。把原先藏在「一键调色」里的
         // 中性化按钮提到最前，去掉 "retouch-rs" 字样；旁边放「智能补偿」开关。
         ui.horizontal_wrapped(|ui| {
@@ -3181,6 +4107,7 @@ impl RetouchApp {
                         .clicked()
                     {
                         self.adj = Adjustments::default();
+                        self.unsaved = true;
                         changed = true;
                     }
                     if ui
@@ -3189,6 +4116,7 @@ impl RetouchApp {
                         .clicked()
                     {
                         self.adj = Adjustments::photo_default();
+                        self.unsaved = true;
                         changed = true;
                     }
                 });
@@ -3238,6 +4166,42 @@ impl RetouchApp {
             if resp.drag_started() {
                 self.spot_drag_base = Some(self.spot.as_ref().map_or(0, |s| s.strokes.len()));
             }
+            // ── 右键：直接在图上取消最近的一处选区 ──
+            // 不做「逐项勾选列表」：自动检测可能一次出上百个点，列表根本拉不动。
+            // 对准红圈右键 = 取消这一处，所见即所得。
+            if resp.secondary_clicked() {
+                if let Some(pos) = resp.interact_pointer_pos().or(resp.hover_pos()) {
+                    let inside = image_rect.contains(pos);
+                    let iw = image_rect.width();
+                    let ih = image_rect.height();
+                    let short = iw.min(ih);
+                    let mut best: Option<(usize, f32)> = None;
+                    if inside {
+                        if let Some(s) = &self.spot {
+                            for (i, st) in s.strokes.iter().enumerate() {
+                                let sx = image_rect.min.x + st.cx * iw;
+                                let sy = image_rect.min.y + st.cy * ih;
+                                let d = ((pos.x - sx).powi(2) + (pos.y - sy).powi(2)).sqrt();
+                                // 命中半径至少 8px，方便小点也能点中。
+                                let hit_r = (st.r_norm * short).max(8.0);
+                                if d <= hit_r && best.is_none_or(|(_, bd)| d < bd) {
+                                    best = Some((i, d));
+                                }
+                            }
+                        }
+                    }
+                    if let Some((idx, _)) = best {
+                        if let Some(s) = &mut self.spot {
+                            s.strokes.remove(idx);
+                            let left = s.strokes.len();
+                            self.dirty_geo = true;
+                            self.status = format!("已取消这处选区，剩余 {left} 处（右键可继续取消）");
+                        }
+                    } else if inside {
+                        self.status = "右键没命中选区——对准红圈中心再点一次".into();
+                    }
+                }
+            }
             if let Some(pos) = resp.hover_pos() {
                 let inside = pos.x >= image_rect.min.x
                     && pos.x <= image_rect.max.x
@@ -3247,7 +4211,8 @@ impl RetouchApp {
                     let cx = ((pos.x - image_rect.min.x) / image_rect.width()).clamp(0.0, 1.0);
                     let cy = ((pos.y - image_rect.min.y) / image_rect.height()).clamp(0.0, 1.0);
                     let r_norm = self.spot_brush as f32 / 1000.0;
-                    let dragging = resp.dragged();
+                    // 只认左键拖动：右键留给「取消选区」，别在右键时误加笔触。
+                    let dragging = resp.dragged_by(egui::PointerButton::Primary);
                     let clicked = resp.clicked();
                     // 拖动/点按都累积笔画（去重：与上一笔间距足够才落点，避免重复）。
                     if dragging || clicked {
@@ -3282,6 +4247,54 @@ impl RetouchApp {
             // 松手：一次性愈合本次拖动累积的所有笔画（松手才算，Win 也流畅）。
             if resp.drag_stopped() {
                 self.spot_drag_base = None;
+                self.dirty_geo = true;
+            }
+        }
+
+        // ═══ 皮肤精修局部画笔（skin feature）：涂 skin_effect 强度场 ═══
+        // 强度场是 base（几何之前）坐标系；只有在没有旋转/裁剪/翻转时显示坐标才等于
+        // base 坐标，否则要反解几何——这里直接禁用并提示，避免涂错位置。
+        #[cfg(feature = "skin")]
+        if self.tool_mode == ToolMode::Skin && self.skin_active {
+            let g = &self.adj.geometry;
+            let geo_identity = g.crop.is_none()
+                && g.quarter_turns == 0
+                && g.rotate_deg.abs() < 1e-3
+                && !g.flip_h
+                && !g.flip_v
+                && g.perspective.is_none();
+            // 方括号快捷键调笔刷（与污点画笔一致的手感）。
+            ui.ctx().input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::OpenBracket) {
+                    self.skin_brush_size = (self.skin_brush_size - 0.01).max(0.01);
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::CloseBracket) {
+                    self.skin_brush_size = (self.skin_brush_size + 0.01).min(0.25);
+                }
+            });
+            if let Some(pos) = resp.hover_pos() {
+                if image_rect.contains(pos) {
+                    let cx = ((pos.x - image_rect.min.x) / image_rect.width()).clamp(0.0, 1.0);
+                    let cy = ((pos.y - image_rect.min.y) / image_rect.height()).clamp(0.0, 1.0);
+                    spot_cursor = Some(pos);
+                    spot_brush_px = (self.skin_brush_size
+                        * image_rect.width().min(image_rect.height()))
+                    .max(4.0);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                    let painting =
+                        resp.dragged_by(egui::PointerButton::Primary) || resp.clicked();
+                    if painting {
+                        if geo_identity {
+                            self.skin_paint_effect(cx, cy);
+                        } else {
+                            self.status =
+                                "画面已旋转/裁剪，局部画笔会涂错位置——请先撤销几何调整，或只用上面的整体滑块"
+                                    .into();
+                        }
+                    }
+                }
+            }
+            if resp.drag_stopped() {
                 self.dirty_geo = true;
             }
         }
@@ -3328,6 +4341,30 @@ impl RetouchApp {
                 }
                 ui.painter()
                     .rect_filled(divider, 0.0, egui::Color32::from_gray(180));
+                // 分屏：左原图 / 右效果，加极简两字角标（不堆技术解释）。
+                let lbl_font = egui::FontId::proportional(13.0);
+                let lbl = |p: &egui::Painter, pos: egui::Pos2, align: egui::Align2, t: &str| {
+                    p.text(
+                        pos + egui::vec2(1.0, 1.0),
+                        align,
+                        t,
+                        lbl_font.clone(),
+                        egui::Color32::WHITE,
+                    );
+                    p.text(pos, align, t, lbl_font.clone(), egui::Color32::from_rgb(25, 25, 25));
+                };
+                lbl(
+                    ui.painter(),
+                    egui::pos2(left_rect.min.x + 8.0, left_rect.min.y + 8.0),
+                    egui::Align2::LEFT_TOP,
+                    "原图",
+                );
+                lbl(
+                    ui.painter(),
+                    egui::pos2(right_rect.max.x - 8.0, right_rect.min.y + 8.0),
+                    egui::Align2::RIGHT_TOP,
+                    "效果",
+                );
             } else {
                 ui.painter().image(
                     after.id(),
@@ -3342,6 +4379,28 @@ impl RetouchApp {
                     before.id(),
                     image_rect,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                // 整图看原图：左上角极简「原图」标签，不写技术解释。
+                let banner = "原图";
+                let bf = egui::FontId::proportional(14.0);
+                let galley = ui.painter().layout_no_wrap(
+                    banner.to_string(),
+                    bf,
+                    egui::Color32::WHITE,
+                );
+                let bw = galley.rect.width() + 24.0;
+                let bh = galley.rect.height() + 12.0;
+                let bx = panel_rect.min.x + 10.0;
+                let by = panel_rect.min.y + 10.0;
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(bx, by), egui::vec2(bw, bh)),
+                    6.0,
+                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 180),
+                );
+                ui.painter().galley(
+                    egui::pos2(bx + 12.0, by + 6.0),
+                    galley,
                     egui::Color32::WHITE,
                 );
             }
@@ -3407,12 +4466,19 @@ impl RetouchApp {
         }
 
         // 污点画笔圆圈预览（最后画，覆盖在图像之上）。
-        if let (Some(p), ToolMode::Spot) = (spot_cursor, self.tool_mode) {
-            ui.painter().circle_stroke(
-                p,
-                spot_brush_px,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 90, 90)),
-            );
+        if let Some(p) = spot_cursor {
+            // 污点画笔=红圈；皮肤画笔按模式区分：加强修=蓝圈，恢复原样=橙圈。
+            let col = match self.tool_mode {
+                ToolMode::Spot => egui::Color32::from_rgb(255, 90, 90),
+                #[cfg(feature = "skin")]
+                ToolMode::Skin => match self.skin_brush_mode {
+                    SkinBrushMode::Strengthen => egui::Color32::from_rgb(90, 170, 255),
+                    SkinBrushMode::Restore => egui::Color32::from_rgb(255, 175, 60),
+                },
+                _ => egui::Color32::from_rgb(255, 90, 90),
+            };
+            ui.painter()
+                .circle_stroke(p, spot_brush_px, egui::Stroke::new(2.0, col));
         }
 
         // 常驻选区标记：把所有已标污点画成圆圈，让「选区」始终可见——
@@ -3459,6 +4525,10 @@ impl RetouchApp {
             Some(i) => i,
             None => return,
         };
+        // 皮肤精修（skin feature）：在几何之前、base 分辨率上重合成。
+        // 缓存（w_map/gate/effect）都建立在 base 坐标系上，必须先于几何施加。
+        #[cfg(feature = "skin")]
+        let base_img = self.skin_apply_preview(base_img);
         let dyn_img = image::DynamicImage::ImageRgb8(base_img);
         let out = apply_geometry(dyn_img, &self.adj.geometry);
         let out_rgb = out.to_rgb8();
@@ -3723,6 +4793,40 @@ impl RetouchApp {
         // 主题：按 ThemeMode 切换深色/浅色
         Self::apply_theme(ctx, self.theme_mode);
 
+        // ── 关闭拦截 + 自动保存（商业标准项1 + 项4）──
+        // 关闭窗口：若用户已决定退出（pending_exit），按选择清理/保留自动保存会话并放行；
+        // 否则若有未保存更改，弹出确认框并取消本次关闭（CancelClose），避免误丢工作。
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if let Some(keep) = self.pending_exit.take() {
+                // 用户已在对话框里选择退出：keep=true 保留会话（下次启动可恢复），
+                // keep=false 丢弃会话；均不再弹框，直接放行关闭。
+                if !keep {
+                    let _ = std::fs::remove_file(autosave_path());
+                }
+            } else if self.unsaved {
+                self.show_exit_confirm = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            } else {
+                // 无未保存更改：清掉可能残留的自动保存文件，干净退出。
+                let _ = std::fs::remove_file(autosave_path());
+            }
+        }
+
+        // 自动保存（节流）：有未保存更改且已载入图片时，每 5 秒把「源路径 + 参数」
+        // 落盘到 ~/.retouch/autosave.json，崩溃/误关后可恢复。
+        let autosave_due = self.unsaved
+            && self.src_path.is_some()
+            && self
+                .last_autosave
+                .map(|t| t.elapsed().as_secs() >= 5)
+                .unwrap_or(true);
+        if autosave_due {
+            if let Some(src) = &self.src_path {
+                let _ = retouch_core::save_session_json(&autosave_path(), Some(src), &self.adj);
+            }
+            self.last_autosave = Some(std::time::Instant::now());
+        }
+
         // 当前指针为空时初始化技巧（启动后第一帧）
         if self.current_tip.is_empty() {
             self.current_tip = tips::random_tip();
@@ -3765,7 +4869,7 @@ impl RetouchApp {
                         .and_then(|e| e.to_str())
                         .unwrap_or("")
                         .to_lowercase();
-                    if ["jpg", "jpeg", "png", "tif", "tiff"].contains(&ext.as_str()) {
+                    if ["jpg", "jpeg", "png", "tif", "tiff", "webp", "heic", "heif"].contains(&ext.as_str()) {
                         // Remember directory from drop too.
                         if let Some(parent) = path.parent() {
                             self.last_open_dir = Some(parent.to_path_buf());
@@ -3971,11 +5075,14 @@ impl RetouchApp {
                         }
                         ui.close_menu();
                     }
-                    if ui.button("对比原图").clicked() {
+                    if ui.button("对比").clicked() {
+                        // 顺序：关 → 分屏(左原图/右实时效果) → 整图看原图 → 关。
+                        // 第一下即分屏，确保一点开就能看到「效果」侧随调色实时变化，
+                        // 不会误以为调色失效。
                         self.compare_mode = match self.compare_mode {
-                            CompareMode::Off => CompareMode::Toggle,
-                            CompareMode::Toggle => CompareMode::Split,
-                            CompareMode::Split => CompareMode::Off,
+                            CompareMode::Off => CompareMode::Split,
+                            CompareMode::Split => CompareMode::Toggle,
+                            CompareMode::Toggle => CompareMode::Off,
                         };
                         ui.close_menu();
                     }
@@ -4007,25 +5114,37 @@ impl RetouchApp {
                 if Self::toolbar_btn(
                     ui,
                     if spot_on { "●污点" } else { "污点" },
-                    "污点修复画笔模式：在画布上点/拖修复瑕疵",
+                    "污点修复画笔模式：在画布上点/拖修复瑕疵；右键取消单处选区",
                 ) {
                     self.tool_mode = ToolMode::Spot;
                 }
+                #[cfg(feature = "skin")]
+                {
+                    let skin_on = self.tool_mode == ToolMode::Skin;
+                    if Self::toolbar_btn(
+                        ui,
+                        if skin_on { "●皮肤精修" } else { "皮肤精修" },
+                        "皮肤精修模式：一键让肤色均匀、瑕疵变淡，保留毛孔纹理不假面",
+                    ) {
+                        self.tool_mode = ToolMode::Skin;
+                    }
+                }
 
                 let cmp_label = match self.compare_mode {
-                    CompareMode::Off => "对比原图",
+                    CompareMode::Off => "对比",
                     CompareMode::Toggle => "对比：原图",
                     CompareMode::Split => "对比：分屏",
                 };
                 if Self::toolbar_btn(
                     ui,
                     cmp_label,
-                    "点击循环：关 → 整图显示原图 → 左右分屏对比（也可按住 \\ 键临时看原图）",
+                    "点击循环：关 → 左右分屏(左原图/右效果) → 整图看原图（按住 \\ 键也可临时看原图）",
                 ) {
+                    // 顺序：关 → 分屏 → 整图看原图 → 关（见菜单按钮说明）。
                     self.compare_mode = match self.compare_mode {
-                        CompareMode::Off => CompareMode::Toggle,
-                        CompareMode::Toggle => CompareMode::Split,
-                        CompareMode::Split => CompareMode::Off,
+                        CompareMode::Off => CompareMode::Split,
+                        CompareMode::Split => CompareMode::Toggle,
+                        CompareMode::Toggle => CompareMode::Off,
                     };
                 }
 
@@ -4160,44 +5279,72 @@ impl RetouchApp {
                         adj: self.adj.clone(),
                         preview_max: PREVIEW_MAX,
                         need_before: self.before_rgba.is_none(),
+                        gen: self.load_gen,
                     })
                     .is_ok()
                 {
                     self.render_pending = true;
+                    self.render_pending_at = Some(std::time::Instant::now());
                 }
+                // channel 满/断开：本帧丢弃，下一帧 dirty 仍为 true 会重试
             }
             self.dirty = false;
         }
 
+        // 超时安全网：render thread 卡死（非 panic）超过 10 秒时强制解锁，
+        // 重新发送渲染请求。防止任何原因导致预览永久冻结。
         if self.render_pending {
+            if let Some(t) = self.render_pending_at {
+                if t.elapsed().as_secs() >= 10 {
+                    eprintln!("[retouch-rs] render timeout（>10s），强制解锁并重发");
+                    self.render_pending = false;
+                    self.render_pending_at = None;
+                    self.dirty = true; // 下一帧触发重新渲染
+                }
+            }
             if let Ok(result) = self.render_rx.try_recv() {
+                // 代次校验：切图后旧图的在途渲染回包 gen 不匹配当前 load_gen，
+                // 直接丢弃——否则会把上一张图的 base_rgba / before_rgba 写进当前图，
+                // 导致切图瞬间闪现旧图、且对比模式「原图」侧显示错图。
+                if result.gen != self.load_gen {
+                    eprintln!(
+                        "[retouch-rs] 丢弃过期渲染回包 gen={}（当前 {}）",
+                        result.gen, self.load_gen
+                    );
+                    self.render_pending = false;
+                    self.render_pending_at = None;
+                } else {
                 // 护栏：after/before 的「尺寸×3」必须与 rgb 缓冲长度严格一致，
                 // 否则 ColorImage::from_rgb 会 panic。几何旋转会让尺寸互换，
                 // 这里双保险——不一致就丢弃本帧结果，等待下一帧正确数据，绝不崩。
                 let [aw, ah] = result.after_size;
-                let need = aw.saturating_mul(ah).saturating_mul(3);
-                if result.after_rgb.len() != need {
-                    eprintln!(
-                        "[retouch-rs] 预览结果尺寸不符（{}×{}×3={} != {}），丢弃本帧",
-                        aw,
-                        ah,
-                        need,
-                        result.after_rgb.len()
-                    );
+                // aw/ah == 0 是 render thread panic 的恢复信号（空结果）：
+                // 只清 render_pending 解锁，不破坏已有的 base_rgba。
+                if aw == 0 || ah == 0 {
+                    eprintln!("[retouch-rs] 收到空渲染结果（render thread panic 恢复），跳过基图更新");
                 } else {
-                    // 基图入库：颜色管线只产出「正立」结果，几何稍后单独施加。
-                    self.base_rgba = Some(result.after_rgb);
-                    self.base_size = result.after_size;
-                }
-                if let Some(rgb) = result.before_rgb {
-                    let [bw, bh] = result.before_size;
-                    let bneed = bw.saturating_mul(bh).saturating_mul(3);
-                    if rgb.len() == bneed {
-                        self.before_rgba = Some(rgb);
-                        self.before_size = result.before_size;
+                    let need = aw.saturating_mul(ah).saturating_mul(3);
+                    if result.after_rgb.len() != need {
+                        eprintln!(
+                            "[retouch-rs] 预览结果尺寸不符（{}×{}×3={} != {}），丢弃本帧",
+                            aw, ah, need, result.after_rgb.len()
+                        );
+                    } else {
+                        // 基图入库：颜色管线只产出「正立」结果，几何稍后单独施加。
+                        self.base_rgba = Some(result.after_rgb);
+                        self.base_size = result.after_size;
+                    }
+                    if let Some(rgb) = result.before_rgb {
+                        let [bw, bh] = result.before_size;
+                        let bneed = bw.saturating_mul(bh).saturating_mul(3);
+                        if rgb.len() == bneed {
+                            self.before_rgba = Some(rgb);
+                            self.before_size = result.before_size;
+                        }
                     }
                 }
                 self.render_pending = false;
+                self.render_pending_at = None;
 
                 // 用「最新几何」把基图转成最终预览（同步、微秒级、不碰颜色管线）。
                 self.rebuild_preview(ctx);
@@ -4214,13 +5361,18 @@ impl RetouchApp {
                                 adj: self.adj.clone(),
                                 preview_max: PREVIEW_MAX,
                                 need_before: self.before_rgba.is_none(),
+                                gen: self.load_gen,
                             })
                             .is_ok()
                         {
                             self.render_pending = true;
+                            // 关键：补发请求也必须记录时间戳，否则 10s 超时安全网
+                            // 因 render_pending_at==None 而失效，预览可能永久冻结。
+                            self.render_pending_at = Some(std::time::Instant::now());
                         }
                     }
                     self.dirty = false;
+                }
                 }
             }
         }
@@ -4238,6 +5390,16 @@ impl RetouchApp {
         // 导出配置对话框（show_export = true 时显示）
         if self.show_export {
             self.show_export_dialog(ctx);
+        }
+
+        // 关闭拦截「未保存提示」对话框（项1）
+        if self.show_exit_confirm {
+            self.show_exit_confirm_dialog(ctx);
+        }
+
+        // 启动恢复「自动保存会话」对话框（项4）
+        if self.show_restore_dialog {
+            self.show_restore_dialog(ctx);
         }
 
         // 及时刷新反馈：egui 默认只在有输入时重绘，后台渲染/智能修图完成的

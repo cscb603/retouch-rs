@@ -7,6 +7,12 @@ Cargo.lock
 *.so
 *.dll
 
+# 皮肤精修模型与权重（红线：绝不进仓库，由打包脚本塞入 .app）
+*.onnx
+*.onnx.data
+models/
+vendor/onnxruntime/
+
 # IDE
 .idea/
 .vscode/

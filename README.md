@@ -20,9 +20,13 @@
 
 ## 30 秒上手
 
-1. 到 [Releases](https://github.com/cscb603/retouch-rs/releases) 下载 `初色-自用版-Mac-0.6.5.zip`（Mac）或 `初色-0.6.5-windows-x64.zip`（Windows），解压。
+1. 到 [Releases](https://github.com/cscb603/retouch-rs/releases) 下载对应版本：
+   - **macOS（分享版）**：`初色-0.6.9-macOS.zip`
+   - **Windows 10/11 64 位（分享版，无 Key）**：`初色-0.6.9-windows-分享版.zip`
+   - **Windows 10/11 64 位（自用版，含 Qwen Key）**：`初色-0.6.9-windows-自用版.zip`
 2. **第一次打开请先看压缩包里的 `首次打开必看-初色.txt`**（Mac 会提示"无法验证"、Win 会被 SmartScreen 拦，都是正常误报，照说明点一下即可）。
 3. 把照片拖进窗口 → 左侧调色 / 选"污点"工具涂抹瑕疵 → 点导出。
+4. 需要后台批量 / 自动化？见下方「命令行（CLI）调用」。
 
 ## 主要特性
 
@@ -38,12 +42,43 @@
 
 ## 下载
 
-| 平台 | 文件 |
-|---|---|
-| macOS（Apple 芯片 / Intel） | `初色-自用版-Mac-0.6.5.zip` |
-| Windows 10 / 11（64 位） | `初色-0.6.5-windows-x64.zip` |
+| 平台 | 文件 | 说明 |
+|---|---|---|
+| macOS 11+（Apple 芯片 / Intel） | `初色-0.6.9-macOS.zip` | 分享版，右键打开即用 |
+| Windows 10 / 11（64 位） | `初色-0.6.9-windows-分享版.zip` | 分享版，无 AI Key，免 VC++ 运行库 |
+| Windows 10 / 11（64 位） | `初色-0.6.9-windows-自用版.zip` | 自用版，已内置 Qwen Key，AI 追色/命名可用 |
 
 > 下载与首次打开的完整说明见压缩包内的 `首次打开必看-初色.txt`。
+> 自用版与分享版**功能完全一致**，区别仅在是否附带 Qwen Key（Key 仅存本地、不联网上传）。
+
+## 命令行（CLI）调用
+
+初色同时提供无界面命令行引擎 `retouch-rs`，适合**后台批量处理、自动化流水线、AI Agent 调用**——GUI 里能做的调色/分析，命令行都能跑，且不占用桌面。
+
+- **获取 CLI 二进制**：源码编译 `cargo build -p retouch-cli` 即可；Windows 分享包只含 GUI（`初色.exe`），CLI 需自行用源码编出 `retouch-rs`。
+- **子命令速查**：
+
+  | 命令 | 作用 |
+  |---|---|
+  | `retouch-rs render 原图.jpg 成品.jpg --exposure 0.3 --contrast 0.15` | 跑 OKLCH 管线渲染（参数可逐个覆盖） |
+  | `retouch-rs analyze 原图.jpg --json` | 把图片量化成 AI 可读的 OKLCH 指标（Agent「看」图用，不传像素） |
+  | `retouch-rs auto 原图.jpg 成品.jpg` | 一键智能调色（本地规则 / 可选 Qwen API） |
+  | `retouch-rs name 原图.jpg --key <QWEN_KEY>` | 用 Qwen 给图片起名/评分 |
+  | `retouch-rs schema --json` | 导出全部可调参数 id（供 Agent 程序化设参） |
+  | `retouch-rs dump --preset x.toml 输出.toml` | 把 preset+CLI 参数固化成 TOML |
+  | `retouch-rs verify 原图.jpg` | 自检：色彩保真 / 功能正确 / 性能基准 |
+
+- **参数组合**：任意子命令都能 `--preset xxx.toml` 作底，再用 `--exposure` 等逐个覆盖；或直接 `--params '{"exposure":0.3}'` 按参数 id 设定。可用参数见 `retouch-rs schema --json`。
+- **后台示例**（无窗口、可丢服务器跑）：
+
+  ```bash
+  # 批量把整目录照片按同一套参数渲染
+  for f in raw/*.jpg; do
+    retouch-rs render "$f" "out/$(basename "$f")" --preset my-grade.toml --sharpen 0.4
+  done
+  ```
+
+> 完整参数见 `crates/retouch-cli` 源码；构建：Mac/Linux 直接 `cargo build -p retouch-cli`，Windows 见 `scripts/build_win.sh`（默认编 GUI，CLI 同源）。
 
 ## 技术
 

@@ -49,9 +49,10 @@ pub fn check(m: &ImageMetrics, base: &ImageMetrics) -> GuardrailStatus {
     let mut reasons: Vec<String> = Vec::new();
 
     // 整体亮度上限：中/低调 mean_l > 0.62 即明显发白/过曝（惨白毁图）；
-    // 高调图（基线中位数已 >0.58，本就明亮/乳白）放宽到 0.70，否则把雪景/日系
-    // 等健康高调照误拦成"毁图"→ 自动修图失效。
-    let bright_cap = if base.tone.median_l > 0.58 {
+    // 高调图（基线本就明亮/乳白）放宽到 0.70，否则把雪景/日系
+    // 等健康高调照误拦成"毁图"→ 自动修图失效。基调用 classify_tonality 的面积比例
+    // 判据（与影调引擎单一真相源一致），不再用 median_l 单点重判。
+    let bright_cap = if crate::tonemap::classify_tonality(base).key == Key::High {
         0.70
     } else {
         0.62
@@ -105,8 +106,12 @@ pub fn check(m: &ImageMetrics, base: &ImageMetrics) -> GuardrailStatus {
     // 自适应阈值：低调图本就有大片暗部/死黑，允许更多暗部位移（否则任何反差/暗部
     // 找回都被误判为"毁图"→ 自动修图对夜景/剪影直接失效退回原图）；高调图同理允许
     // 更多高光位移。中调图仍严格保护。
-    let low_key = base.tone.median_l < 0.42;
-    let high_key = base.tone.median_l > 0.58;
+    // 自适应阈值：低调图本就有大片暗部/死黑，允许更多暗部位移（否则任何反差/暗部
+    // 找回都被误判为"毁图"→ 自动修图对夜景/剪影直接失效退回原图）；高调图同理允许
+    // 更多高光位移。基调用 classify_tonality 的面积比例判据（与影调引擎单一真相源一致）。
+    let cls = crate::tonemap::classify_tonality(base);
+    let low_key = cls.key == Key::Low;
+    let high_key = cls.key == Key::High;
 
     let cw = m.exposure.highlight_clip_pct;
     let bcw = base.exposure.highlight_clip_pct;

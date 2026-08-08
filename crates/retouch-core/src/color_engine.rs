@@ -328,13 +328,9 @@ fn classify_scene(
     sky_ratio: f32,
     _green_ratio: f32,
 ) -> SceneType {
-    let key = if m.tone.median_l < 0.38 {
-        Key::Low
-    } else if m.tone.median_l > 0.62 {
-        Key::High
-    } else {
-        Key::Mid
-    };
+    // 基调统一复用 classify_tonality 的面积比例判据（与影调引擎单一真相源一致），
+    // 不再各自用 median_l 重判（阈值还不一致：此处 0.38/0.62，tonemap 0.45/0.58）。
+    let key = crate::tonemap::classify_tonality(m).key;
 
     // 极端高反差（剪影/全长调）
     if m.dynamic_range > 0.60 {

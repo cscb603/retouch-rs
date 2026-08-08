@@ -630,6 +630,18 @@ impl Adjustments {
             mix: 1.0,
         }
     }
+
+    /// 导入图片时的起点参数（商业软件标准）：
+    /// - 首张（相册为空）= 原图**零修改**（`default()`，恒等渲染即原图）；
+    ///   绝不在导入时自动套"照片默认"调味，否则用户会看到"自动修了一下"。
+    /// - 后续图（相册非空）= 沿用当前工作参数（用户已调的参数应保留）。
+    pub fn import_baseline_adj(album_empty: bool, current: &Adjustments) -> Adjustments {
+        if album_empty {
+            Adjustments::default()
+        } else {
+            current.clone()
+        }
+    }
 }
 
 /// sRGB encoded 8-bit -> linear-light f32 (exact sRGB transfer function).
@@ -1147,6 +1159,44 @@ pub fn smart_beauty_preset() -> Adjustments {
     a
 }
 
+/// 自动保存会话：把「当前源路径 + 当前调色参数」序列化为 JSON（崩溃/意外退出后恢复用）。
+/// 以 `Preset` 作为 `Adjustments` 的可序列化桥梁（Adjustments 本身未 derive Serialize）。
+pub fn save_session_json(
+    path: &std::path::Path,
+    src: Option<&std::path::Path>,
+    adj: &Adjustments,
+) -> std::io::Result<()> {
+    use serde_json::json;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let preset = adj.to_preset();
+    let obj = json!({
+        "src": src.map(|p| p.to_string_lossy().to_string()),
+        "adj": preset,
+    });
+    let s = serde_json::to_string(&obj)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(path, s)
+}
+
+/// 读取自动保存会话。源文件已不存在则返回 None（无法恢复）。
+pub fn load_session_json(
+    path: &std::path::Path,
+) -> Option<(std::path::PathBuf, Adjustments)> {
+    use serde_json::Value;
+    let data = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&data).ok()?;
+    let src = v.get("src")?.as_str()?;
+    let p = std::path::PathBuf::from(src);
+    if !p.exists() {
+        return None;
+    }
+    let preset: crate::preset::Preset =
+        serde_json::from_value(v.get("adj")?.clone()).ok()?;
+    Some((p, preset.to_adjustments()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1195,6 +1245,69 @@ mod tests {
                 assert_eq!(p.0[i], q.0[i], "identity path changed pixel");
             }
         }
+    }
+
+    // ── 导入零修改回归测试 ────────────────────────────────────────────────
+    // 商业软件标准：打开一张图默认就是原图，绝不能自动套"照片默认"调味。
+    // 这些测试锁死 import_baseline_adj 的语义，谁把自动调味塞回导入都会让它们变红。
+
+    #[test]
+    fn import_first_image_is_identity() {
+        // 首张导入（相册为空）必须是零修改，与用户当前参数无关。
+        let cur = Adjustments::photo_default();
+        let a = Adjustments::import_baseline_adj(true, &cur);
+        // 关键字段必须全部为零（恒等）。
+        assert_eq!(a.exposure_ev, 0.0, "首图曝光应=0");
+        assert_eq!(a.grade.contrast, 0.0, "首图对比度应=0");
+        assert_eq!(a.grade.dehaze, 0.0, "首图去雾应=0");
+        assert_eq!(a.grade.shadow_lift, 0.0, "首图阴影应=0");
+        assert_eq!(a.grade.deep_shadow_lift, 0.0, "首图黑色应=0");
+        assert_eq!(a.mix, 1.0, "首图 mix 应=1(全效果=原图)");
+        // 整体等于 default（恒等渲染即原图）。
+        assert_eq!(
+            a.grade.contrast,
+            Adjustments::default().grade.contrast
+        );
+    }
+
+    #[test]
+    fn import_subsequent_keeps_current() {
+        // 后续图（相册非空）沿用当前工作参数。
+        let cur = Adjustments::photo_default();
+        let a = Adjustments::import_baseline_adj(false, &cur);
+        assert_eq!(a.grade.contrast, 0.15, "后续图应沿用当前对比度");
+        assert_eq!(a.grade.dehaze, 0.25, "后续图应沿用当前去雾");
+    }
+
+    #[test]
+    fn photo_default_is_not_identity() {
+        // 钉死：photo_default 确实带调味（≠恒等），所以它绝不能用于"导入默认"。
+        let d = Adjustments::default();
+        let p = Adjustments::photo_default();
+        assert_ne!(d.grade.contrast, p.grade.contrast, "photo_default 必须带对比度调味");
+        assert_ne!(d.grade.dehaze, p.grade.dehaze, "photo_default 必须带去雾调味");
+    }
+
+    #[test]
+    fn render_identity_is_original_image() {
+        // 端到端确认：用 identity 渲染的结果，与原图逐像素一致（与 import 零修改呼应）。
+        let mut img = RgbImage::new(96, 96);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            let v = ((x * 5 + y * 19) % 256) as u8;
+            *px = Rgb([v, v.wrapping_mul(2), v.wrapping_mul(7)]);
+        }
+        let dyn_img = DynamicImage::ImageRgb8(img.clone());
+        let out = render(&dyn_img, &Adjustments::import_baseline_adj(true, &Adjustments::photo_default()));
+        let mut max_diff = 0i32;
+        for (p, q) in img.pixels().zip(out.pixels()) {
+            for i in 0..3 {
+                let d = (p.0[i] as i32 - q.0[i] as i32).abs();
+                if d > max_diff {
+                    max_diff = d;
+                }
+            }
+        }
+        assert!(max_diff <= 2, "首图导入(identity)渲染与原图差异过大: {}", max_diff);
     }
 
     /// Exposure must brighten the image.
